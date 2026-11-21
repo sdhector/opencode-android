@@ -25,6 +25,7 @@ import ai.opencode.feature.drawer.HomeFeatureTestSupport.snapshot
 import ai.opencode.feature.drawer.list.DrawerPinDrag
 import ai.opencode.feature.drawer.list.DrawerPinDragHost
 import ai.opencode.feature.drawer.list.DrawerPinDragItem
+import ai.opencode.feature.drawer.list.DrawerPinDropTarget
 import ai.opencode.feature.drawer.list.DrawerPinGroup
 import ai.opencode.feature.session.SessionFeature
 import ai.opencode.feature.session.isDraft
@@ -212,8 +213,8 @@ class HomeFeatureTestsDrawer {
         override fun visibleItems(): List<DrawerPinDragItem> = items.toList()
         override val width: Float = 390f
         override var viewportTop: Float = 0f
-        val groupDrops = ArrayList<Pair<String, String>>()
-        override fun dropInGroup(sessionID: String, groupID: String) {
+        val groupDrops = ArrayList<Pair<String, String?>>()
+        override fun dropInGroup(sessionID: String, groupID: String?) {
             groupDrops += sessionID to groupID
         }
         override fun flushNow() = Unit
@@ -392,16 +393,17 @@ class HomeFeatureTestsDrawer {
 
     /**
      * The list as it lays out with groups: Pinned (if [pins]), then group `g1` (sessions m1, m2),
-     * a closed `g2`, New Group, Recents (r1, r2, r3). Heights are the drawer's: 56 a section
-     * header, 48 a row.
+     * a closed `g2`, New Group, Recents ([recents]; with none, the drop slot a lift shows). Heights
+     * are the drawer's: 56 a section header, 48 a row.
      */
-    private class GroupedList(val host: TestDrawerPinHost, pins: List<String>) {
+    private class GroupedList(val host: TestDrawerPinHost, pins: List<String>, val recents: List<String> = listOf("r1", "r2", "r3")) {
         val stride = 48f
         val section = 56f
         val g1 = DrawerPinDrag.ItemKey.GroupHeader("g1")
         val g2 = DrawerPinDrag.ItemKey.GroupHeader("g2")
         val groups = listOf(DrawerPinGroup("g1", listOf("m1", "m2")), DrawerPinGroup("g2", emptyList()))
         val top: Float
+        val bottom: Float
 
         init {
             var y = 0f
@@ -420,7 +422,9 @@ class HomeFeatureTestsDrawer {
             place(g2, stride)
             place(DrawerPinDrag.ItemKey.NewGroup, stride)
             place(DrawerPinDrag.ItemKey.RecentsHeader, section)
-            listOf("r1", "r2", "r3").forEach { place(DrawerPinDrag.ItemKey.Row(it), stride) }
+            recents.forEach { place(DrawerPinDrag.ItemKey.Row(it), stride) }
+            if (recents.isEmpty()) place(DrawerPinDrag.ItemKey.RecentsDrop, stride)
+            bottom = y
         }
 
         fun minY(key: DrawerPinDrag.ItemKey) = host.items.first { it.key == key }.minY
@@ -437,8 +441,8 @@ class HomeFeatureTestsDrawer {
         sessionID = id,
         isPinnedSection = fromPinned,
         pinnedIDs = pinned,
-        recentIDs = listOf("r1", "r2", "r3"),
-        unpinnedRecentsIndex = listOf("r1", "r2", "r3").indexOf(id).coerceAtLeast(0),
+        recentIDs = list.recents,
+        unpinnedRecentsIndex = list.recents.indexOf(id).coerceAtLeast(0),
         showsShortcuts = false,
         reducedMotion = false,
         fingerY = list.minY(list.row(id)) + list.stride / 2,
@@ -472,7 +476,7 @@ class HomeFeatureTestsDrawer {
         pinDrag.updateDrag(fingerY = list.top + 20)
         frames.pump(pinDrag)
         assertEquals(DrawerPinDrag.HoverTarget.Pinned(0), pinDrag.hoverTarget)
-        assertNull("the slot, not a group, is the target", pinDrag.groupTarget)
+        assertNull("the slot, not a group, is the target", pinDrag.dropTarget)
         assertEquals("rows below the lifted one close its hole", room - list.stride, pinDrag.translation(list.row("r3")), 0.5f)
         assertEquals(room, pinDrag.translation(list.g1), 0.5f)
 
@@ -567,7 +571,7 @@ class HomeFeatureTestsDrawer {
         pinDrag.updateDrag(fingerY = pinnedSlot + 10)
         frames.pump(pinDrag)
         assertEquals(DrawerPinDrag.HoverTarget.Pinned(0), pinDrag.hoverTarget)
-        assertNull(pinDrag.groupTarget)
+        assertNull(pinDrag.dropTarget)
         assertEquals(list.stride, pinDrag.translation(list.row("p1")), 0.5f)
         assertEquals(list.stride, pinDrag.translation(list.g1), 0.5f)
         for (key in listOf(list.row("m2"), list.g2, DrawerPinDrag.ItemKey.NewGroup, DrawerPinDrag.ItemKey.RecentsHeader, list.row("r1"), list.row("r3"))) {
@@ -593,7 +597,7 @@ class HomeFeatureTestsDrawer {
         pinDrag.beginGrouped(list, "r2", pinned = emptyList())
         fun over(y: Float): String? {
             pinDrag.updateDrag(fingerY = y)
-            return pinDrag.groupTarget?.id
+            return pinDrag.dropTarget?.groupID
         }
         val g1 = list.minY(list.g1)
         assertEquals("the header", "g1", over(g1 + 24))
@@ -602,7 +606,7 @@ class HomeFeatureTestsDrawer {
         assertEquals("a closed, empty group's whole header", "g2", over(list.minY(list.g2) + 2))
         assertEquals("g2", over(list.minY(list.g2) + 46))
         over(g1 + 1)
-        assertEquals("the span covers the header and both sessions", 3 * list.stride, pinDrag.groupTarget?.height ?: Float.NaN, 0.5f)
+        assertEquals("the span covers the header and both sessions", 3 * list.stride, pinDrag.dropTarget?.height ?: Float.NaN, 0.5f)
         assertNull("New Group is no group", over(list.minY(DrawerPinDrag.ItemKey.NewGroup) + 24))
         assertNull("nor is Recents' header", over(list.minY(DrawerPinDrag.ItemKey.RecentsHeader) + 28))
         assertNull("nor a recent row", over(list.minY(list.row("r1")) + 24))
@@ -610,7 +614,7 @@ class HomeFeatureTestsDrawer {
 
         pinDrag.cancelDrag()
         frames.pump(pinDrag)
-        assertNull(pinDrag.groupTarget)
+        assertNull(pinDrag.dropTarget)
         pinDrag.detach(host)
     }
 
@@ -629,7 +633,7 @@ class HomeFeatureTestsDrawer {
 
         fun over(y: Float): String? {
             pinDrag.updateDrag(fingerY = y)
-            return pinDrag.groupTarget?.id
+            return pinDrag.dropTarget?.groupID
         }
         // Where the layout puts m1, the slot's room now shows the pinned row.
         assertNull("the slot is not a group", over(list.minY(list.g1) + 10))
@@ -658,7 +662,7 @@ class HomeFeatureTestsDrawer {
         pinDrag.beginGrouped(list, "p1", pinned = listOf("p1", "p2"), fromPinned = true, actions = actions)
         pinDrag.updateDrag(fingerY = list.minY(list.row("m1")) + 10)
         frames.pump(pinDrag)
-        assertEquals("g1", pinDrag.groupTarget?.id)
+        assertEquals("g1", pinDrag.dropTarget?.groupID)
         assertEquals(DrawerPinDrag.HoverTarget.Pinned(0), pinDrag.hoverTarget)
         assertEquals(0f, pinDrag.translation(list.g1), 0.5f)
         assertEquals(0f, pinDrag.translation(DrawerPinDrag.ItemKey.RecentsHeader), 0.5f)
@@ -667,7 +671,7 @@ class HomeFeatureTestsDrawer {
         assertEquals(listOf("p1" to "g1"), host.groupDrops)
         assertTrue("no pin or reorder is sent", actions.none { it is Action.DrawerRowDropped })
         assertNull(pinDrag.activeSessionID)
-        assertNull(pinDrag.groupTarget)
+        assertNull(pinDrag.dropTarget)
         assertTrue(pinDrag.translations.isEmpty())
 
         // A recent row released over Recents' own area changes nothing.
@@ -677,6 +681,144 @@ class HomeFeatureTestsDrawer {
         frames.pump(pinDrag)
         assertEquals(listOf("p1" to "g1"), host.groupDrops)
         assertTrue(actions.none { it is Action.DrawerRowDropped })
+        pinDrag.detach(host)
+    }
+
+    @Test
+    fun aGroupedRowDroppedOnRecentsLeavesItsGroup() = homeTest { h ->
+        val frames = Frames(this)
+        val host = TestDrawerPinHost(frames.scope())
+        val pinDrag = DrawerPinDrag()
+        pinDrag.attach(host)
+        val list = GroupedList(host, pins = listOf("p1"))
+        val actions = ArrayList<Action>()
+        val recentsTop = list.minY(DrawerPinDrag.ItemKey.RecentsHeader)
+
+        pinDrag.beginGrouped(list, "m1", pinned = listOf("p1"), actions = actions)
+        fun over(y: Float): DrawerPinDropTarget? {
+            pinDrag.updateDrag(fingerY = y)
+            return pinDrag.dropTarget
+        }
+        assertNull("its own place", over(list.minY(list.row("m1")) + 24))
+        assertNull("its own group", over(list.minY(list.g1) + 10))
+        assertNull("New Group", over(list.minY(DrawerPinDrag.ItemKey.NewGroup) + 24))
+        assertEquals("another group", "g2", over(list.minY(list.g2) + 24)?.groupID)
+        assertEquals("Recents' header", DrawerPinDropTarget(null, recentsTop, list.bottom - recentsTop), over(recentsTop + 10))
+        assertEquals("a recent row", null, over(list.minY(list.row("r3")) + 24)?.groupID)
+        assertTrue("the room below the last one", over(list.bottom + 40) != null)
+        assertEquals("over Recents no pin slot opens", DrawerPinDrag.HoverTarget.Recent, pinDrag.hoverTarget)
+        frames.pump(pinDrag)
+        assertEquals(0f, pinDrag.translation(list.row("p1")), 0.5f)
+        assertEquals(0f, pinDrag.translation(DrawerPinDrag.ItemKey.RecentsHeader), 0.5f)
+
+        pinDrag.endDrag(fingerX = 10f, fingerY = recentsTop + 10)
+        assertEquals(listOf<Pair<String, String?>>("m1" to null), host.groupDrops)
+        assertTrue("no pin or unpin is sent", actions.none { it is Action.DrawerRowDropped })
+        assertNull(pinDrag.activeSessionID)
+        assertNull(pinDrag.dropTarget)
+        assertTrue(pinDrag.translations.isEmpty())
+        pinDrag.detach(host)
+    }
+
+    @Test
+    fun aGroupedRowPutBackOrCancelledStaysInItsGroup() = homeTest { h ->
+        val frames = Frames(this)
+        val host = TestDrawerPinHost(frames.scope())
+        val pinDrag = DrawerPinDrag()
+        pinDrag.attach(host)
+        val list = GroupedList(host, pins = emptyList())
+        val actions = ArrayList<Action>()
+        val m2 = list.minY(list.row("m2"))
+
+        // Put back where it was.
+        pinDrag.beginGrouped(list, "m2", pinned = emptyList(), actions = actions)
+        pinDrag.updateDrag(fingerY = m2 + 30)
+        pinDrag.endDrag(fingerX = 10f, fingerY = m2 + 30)
+        frames.pump(pinDrag)
+
+        // Over Recents, then let go off the list.
+        pinDrag.beginGrouped(list, "m2", pinned = emptyList(), actions = actions)
+        pinDrag.updateDrag(fingerY = list.minY(list.row("r1")) + 10)
+        assertEquals(null, pinDrag.dropTarget?.groupID)
+        pinDrag.endDrag(fingerX = -200f, fingerY = list.minY(list.row("r1")) + 10)
+        frames.pump(pinDrag)
+
+        assertTrue(host.groupDrops.isEmpty())
+        assertTrue(actions.none { it is Action.DrawerRowDropped })
+        assertNull(pinDrag.dropTarget)
+        assertNull(pinDrag.activeSessionID)
+        assertTrue(pinDrag.translations.isEmpty())
+        pinDrag.detach(host)
+    }
+
+    @Test
+    fun aPinnedRowOverRecentsShowsItAndLandsThroughTheUnpin() = homeTest { h ->
+        val frames = Frames(this)
+        val host = TestDrawerPinHost(frames.scope())
+        val pinDrag = DrawerPinDrag()
+        pinDrag.attach(host)
+        val list = GroupedList(host, pins = listOf("p1", "p2"))
+        val actions = ArrayList<Action>()
+        val y = list.minY(list.row("r2")) + 10
+
+        pinDrag.beginGrouped(list, "p1", pinned = listOf("p1", "p2"), fromPinned = true, actions = actions)
+        pinDrag.updateDrag(fingerY = y)
+        frames.pump(pinDrag)
+        assertEquals(DrawerPinDrag.HoverTarget.Recent, pinDrag.hoverTarget)
+        assertTrue("Recents is lit", pinDrag.dropTarget != null && pinDrag.dropTarget?.groupID == null)
+        assertEquals("the rows above it close up behind the pin", -list.stride, pinDrag.translation(list.g1), 0.5f)
+
+        pinDrag.endDrag(fingerX = 10f, fingerY = y)
+        frames.pump(pinDrag)
+        assertTrue("it lands in its slot rather than jumping", host.groupDrops.isEmpty())
+        assertEquals(Action.DrawerRowDropped("p1", null), actions.last())
+        pinDrag.detach(host)
+    }
+
+    @Test
+    fun anEmptyRecentsTakesAGroupedRowOnItsDropSlot() = homeTest { h ->
+        val frames = Frames(this)
+        val host = TestDrawerPinHost(frames.scope())
+        val pinDrag = DrawerPinDrag()
+        pinDrag.attach(host)
+        val list = GroupedList(host, pins = emptyList(), recents = emptyList())
+        val recentsTop = list.minY(DrawerPinDrag.ItemKey.RecentsHeader)
+        val slot = list.minY(DrawerPinDrag.ItemKey.RecentsDrop)
+
+        pinDrag.beginGrouped(list, "m1", pinned = emptyList())
+        pinDrag.updateDrag(fingerY = slot + 24)
+        assertEquals("the header and its slot", DrawerPinDropTarget(null, recentsTop, list.section + list.stride), pinDrag.dropTarget)
+        frames.pump(pinDrag)
+        assertNull("the empty Pin slot stays shut", pinDrag.dropZone)
+
+        pinDrag.endDrag(fingerX = 10f, fingerY = slot + 24)
+        assertEquals(listOf<Pair<String, String?>>("m1" to null), host.groupDrops)
+        pinDrag.detach(host)
+    }
+
+    @Test
+    fun anEmptyRecentsSlotReceivesTheOnlyPinnedRow() = homeTest { h ->
+        val frames = Frames(this)
+        val host = TestDrawerPinHost(frames.scope())
+        val pinDrag = DrawerPinDrag()
+        pinDrag.attach(host)
+        val list = GroupedList(host, pins = listOf("p1"), recents = emptyList())
+        val actions = ArrayList<Action>()
+        val slot = list.minY(DrawerPinDrag.ItemKey.RecentsDrop)
+        val closes = -(list.section + list.stride)
+
+        pinDrag.beginGrouped(list, "p1", pinned = listOf("p1"), fromPinned = true, actions = actions)
+        pinDrag.updateDrag(fingerY = slot + 24)
+        frames.pump(pinDrag)
+        assertEquals(DrawerPinDrag.HoverTarget.Recent, pinDrag.hoverTarget)
+        assertEquals("Pinned closes above it", closes, pinDrag.translation(DrawerPinDrag.ItemKey.RecentsHeader), 0.5f)
+        assertEquals("the slot moves with its header", closes, pinDrag.translation(DrawerPinDrag.ItemKey.RecentsDrop), 0.5f)
+        assertEquals("the row lands on the slot", slot + closes, pinDrag.landingSlotMinY() ?: Float.NaN, 0.5f)
+
+        pinDrag.endDrag(fingerX = 10f, fingerY = slot + 24)
+        frames.pump(pinDrag)
+        assertEquals(Action.DrawerRowDropped("p1", null), actions.last())
+        assertTrue(host.groupDrops.isEmpty())
         pinDrag.detach(host)
     }
 

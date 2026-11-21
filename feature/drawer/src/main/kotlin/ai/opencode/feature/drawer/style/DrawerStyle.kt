@@ -489,13 +489,7 @@ fun DrawerEmptyPinDropZone(
     reducedMotion: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val rowGap = DrawerTunables.rowGap
-    val cornerRadius = DrawerMetrics.rowCornerRadius
-    val hovered = hoverProgress >= 0.45f
     val colors = OpenCodeTheme.colors
-    val accent = colors.accent
-    val primary = colors.text
-    val rowFont = DrawerTunables.rowFont.font
     val dropToPin = stringResource(R.string.drawer_drop_to_pin)
     Column(
         modifier
@@ -504,54 +498,73 @@ fun DrawerEmptyPinDropZone(
             .clearAndSetSemantics { contentDescription = dropToPin },
     ) {
         EmptyPinHeader(progress = openProgress, headerHeight = headerHeight)
-        Row(
-            modifier = Modifier
-                .padding(horizontal = DrawerMetrics.rowEdge, vertical = rowGap / 2)
-                .graphicsLayer { alpha = openProgress.coerceIn(0f, 1f) }
-                .fillMaxWidth()
-                .heightIn(min = DrawerMetrics.rowHeight)
-                .drawBehind {
-                    val radius = CornerRadius(cornerRadius.toPx())
-                    val fill = if (hovered) accent.copy(alpha = 0.11f * hoverProgress) else primary.copy(alpha = 0.04f * openProgress)
-                    drawRoundRect(color = fill, cornerRadius = radius)
-                    val line = 1.dp.toPx()
-                    val stroke = if (hovered) accent.copy(alpha = 0.32f * hoverProgress) else primary.copy(alpha = 0.11f * openProgress)
-                    drawRoundRect(
-                        color = stroke,
-                        topLeft = Offset(line / 2, line / 2),
-                        size = Size(size.width - line, size.height - line),
-                        cornerRadius = CornerRadius((cornerRadius.toPx() - line / 2).coerceAtLeast(0f)),
-                        style = Stroke(
-                            width = line,
-                            pathEffect = if (hovered) null else PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 3.dp.toPx())),
-                        ),
-                    )
-                }
-                .padding(start = DrawerMetrics.textInset, end = DrawerMetrics.trailingInset),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Box(Modifier.width(20.dp), contentAlignment = Alignment.CenterStart) {
-                OpenCodeIcon(
-                    symbol = if (hovered) SFSymbol.PinFill else SFSymbol.Pin,
-                    contentDescription = null,
-                    tint = if (hovered) accent else colors.secondaryText,
-                    modifier = Modifier.graphicsLayer {
-                        val scale = if (reducedMotion) 1f else 0.9f + 0.14f * hoverProgress
-                        scaleX = scale
-                        scaleY = scale
-                        rotationZ = if (reducedMotion) 0f else (1f - hoverProgress) * 16f
-                    },
+        DrawerDropSlotRow(dropToPin, openProgress, hoverProgress) { hovered ->
+            OpenCodeIcon(
+                symbol = if (hovered) SFSymbol.PinFill else SFSymbol.Pin,
+                contentDescription = null,
+                tint = if (hovered) colors.accent else colors.secondaryText,
+                modifier = Modifier.graphicsLayer {
+                    val scale = if (reducedMotion) 1f else 0.9f + 0.14f * hoverProgress
+                    scaleX = scale
+                    scaleY = scale
+                    rotationZ = if (reducedMotion) 0f else (1f - hoverProgress) * 16f
+                },
+            )
+        }
+    }
+}
+
+/** An empty section's drop slot, one row tall: dashed while it waits, filled while the dragged row is over it. */
+@Composable
+internal fun DrawerDropSlotRow(
+    label: String,
+    openProgress: Float,
+    hoverProgress: Float,
+    modifier: Modifier = Modifier,
+    icon: @Composable (hovered: Boolean) -> Unit,
+) {
+    val rowGap = DrawerTunables.rowGap
+    val cornerRadius = DrawerMetrics.rowCornerRadius
+    val hovered = hoverProgress >= 0.45f
+    val colors = OpenCodeTheme.colors
+    val accent = colors.accent
+    val primary = colors.text
+    val rowFont = DrawerTunables.rowFont.font
+    Row(
+        modifier = modifier
+            .padding(horizontal = DrawerMetrics.rowEdge, vertical = rowGap / 2)
+            .graphicsLayer { alpha = openProgress.coerceIn(0f, 1f) }
+            .fillMaxWidth()
+            .heightIn(min = DrawerMetrics.rowHeight)
+            .drawBehind {
+                val radius = CornerRadius(cornerRadius.toPx())
+                val fill = if (hovered) accent.copy(alpha = 0.11f * hoverProgress) else primary.copy(alpha = 0.04f * openProgress)
+                drawRoundRect(color = fill, cornerRadius = radius)
+                val line = 1.dp.toPx()
+                val stroke = if (hovered) accent.copy(alpha = 0.32f * hoverProgress) else primary.copy(alpha = 0.11f * openProgress)
+                drawRoundRect(
+                    color = stroke,
+                    topLeft = Offset(line / 2, line / 2),
+                    size = Size(size.width - line, size.height - line),
+                    cornerRadius = CornerRadius((cornerRadius.toPx() - line / 2).coerceAtLeast(0f)),
+                    style = Stroke(
+                        width = line,
+                        pathEffect = if (hovered) null else PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 3.dp.toPx())),
+                    ),
                 )
             }
-            Text(
-                dropToPin,
-                style = rowFont.copy(fontWeight = if (hovered) FontWeight.Medium else FontWeight.Normal),
-                color = if (hovered) primary else colors.secondaryText,
-                maxLines = 1,
-            )
-            Spacer(Modifier.weight(1f).widthIn(min = 4.dp))
-        }
+            .padding(start = DrawerMetrics.textInset, end = DrawerMetrics.trailingInset),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.width(20.dp), contentAlignment = Alignment.CenterStart) { icon(hovered) }
+        Text(
+            label,
+            style = rowFont.copy(fontWeight = if (hovered) FontWeight.Medium else FontWeight.Normal),
+            color = if (hovered) primary else colors.secondaryText,
+            maxLines = 1,
+        )
+        Spacer(Modifier.weight(1f).widthIn(min = 4.dp))
     }
 }
 

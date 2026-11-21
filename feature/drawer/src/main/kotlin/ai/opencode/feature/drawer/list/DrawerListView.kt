@@ -269,11 +269,8 @@ fun DrawerListView(
                 }
             }
 
-            override fun dropInGroup(sessionID: String, groupID: String) {
-                if (store.state.isPinned(sessionID)) {
-                    store.send(HomeFeature.Action.DrawerRowDropped(sessionID, null))
-                }
-                store.send(HomeFeature.Action.MoveSessionsToGroup(listOf(sessionID), groupID))
+            override fun dropInGroup(sessionID: String, groupID: String?) {
+                store.send(HomeFeature.Action.DrawerRowDroppedInGroup(sessionID, groupID))
                 flushNow()
             }
 
@@ -417,7 +414,7 @@ fun DrawerListView(
         // Beneath the rows: they move out of its way, and the lifted row (drawn in the list) stays
         // above it.
         DrawerPinDropZoneOverlay(pinDrag)
-        DrawerGroupDropOverlay(pinDrag)
+        DrawerSectionDropOverlay(pinDrag)
         LazyColumn(
             state = listState,
             contentPadding = contentPadding,
@@ -471,6 +468,7 @@ fun DrawerListView(
                     }
                     DrawerListItem.NewGroup -> DrawerListNewGroupRow(pinDrag, onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) })
                     is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag)
+                    DrawerListItem.RecentsDrop -> DrawerRecentsDropSlot(pinDrag)
                     DrawerListItem.Empty -> DrawerListEmptyRow(current.search)
                     DrawerListItem.Footer -> DrawerListFooterRow(
                         footer = current.footer ?: DrawerListFooter.loading,
@@ -604,6 +602,7 @@ private fun contentType(item: DrawerListItem): Int = when (item) {
     is DrawerListItem.Header -> 2
     is DrawerListItem.GroupHeader -> 8
     DrawerListItem.NewGroup -> 9
+    DrawerListItem.RecentsDrop -> 10
     is DrawerListItem.Session -> 3
     DrawerListItem.Empty -> 4
     is DrawerListItem.Ghost -> 5
@@ -624,6 +623,7 @@ private fun pinDragKey(key: Any): DrawerPinDrag.ItemKey? {
         text == DrawerListItem.Header(DrawerSectionHeaderKind.Pinned).key -> DrawerPinDrag.ItemKey.PinnedHeader
         text == DrawerListItem.Header(DrawerSectionHeaderKind.Recents).key -> DrawerPinDrag.ItemKey.RecentsHeader
         text == DrawerListItem.NewGroup.key -> DrawerPinDrag.ItemKey.NewGroup
+        text == DrawerListItem.RecentsDrop.key -> DrawerPinDrag.ItemKey.RecentsDrop
         text.startsWith("group-") -> DrawerPinDrag.ItemKey.GroupHeader(text.removePrefix("group-"))
         else -> null
     }

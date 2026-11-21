@@ -39,6 +39,8 @@ sealed interface DrawerListItem {
     data class GroupHeader(val groupID: String) : DrawerListItem
     /** Ends the group section: makes a group. */
     data object NewGroup : DrawerListItem
+    /** Under Recents' header while a pinned or grouped row is lifted and Recents has none: where it drops. */
+    data object RecentsDrop : DrawerListItem
     data object Empty : DrawerListItem
     /** Under the last row while more sessions can be read ([DrawerListFooter]). */
     data object Footer : DrawerListItem
@@ -57,6 +59,7 @@ sealed interface DrawerListItem {
             is Session -> "session-$id"
             is GroupHeader -> "group-$groupID"
             NewGroup -> "new-group"
+            RecentsDrop -> "recents-drop"
             Empty -> "empty"
             Footer -> "footer"
             is Ghost -> "ghost-$index"
@@ -326,11 +329,13 @@ data class DrawerListModel(
             if (!searching) groupItems += DrawerListItem.NewGroup
             val ungroupedUnsent = unsentRows.filter { membership[it.session.id] == null }
             val recentItems = mutableListOf<DrawerListItem>()
-            if (recents.isNotEmpty() || ungroupedUnsent.isNotEmpty()) {
-                recentItems += header(
-                    DrawerSectionHeaderKind.Recents,
-                    follows = pinned.isNotEmpty() || showsGroupSection || showsShortcuts,
-                )
+            val recentsFollows = pinned.isNotEmpty() || showsGroupSection || showsShortcuts
+            if (recents.isEmpty() && ungroupedUnsent.isEmpty() && liftedID != null) {
+                // The lifted row is pinned or grouped: Recents shows as a place to drop it.
+                recentItems += header(DrawerSectionHeaderKind.Recents, follows = recentsFollows)
+                recentItems += DrawerListItem.RecentsDrop
+            } else if (recents.isNotEmpty() || ungroupedUnsent.isNotEmpty()) {
+                recentItems += header(DrawerSectionHeaderKind.Recents, follows = recentsFollows)
                 for (unsent in ungroupedUnsent) {
                     rows[unsent.session.id] = unsent
                     recentItems += DrawerListItem.Session(unsent.session.id)

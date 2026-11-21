@@ -71,17 +71,26 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
             return Reduced(s)
         }
 
-        is Action.MoveSessionsToGroup -> {
-            val members = movableIDs(state, action.sessionIDs)
-            if (members.isEmpty()) return Reduced(state)
+        is Action.MoveSessionsToGroup -> return Reduced(movingSessions(state, action.sessionIDs, action.groupID))
+
+        is Action.DrawerRowDroppedInGroup -> {
             if (action.groupID != null && state.sessionGroups.group(serverID, action.groupID) == null) return Reduced(state)
-            haptics.play(Haptic.selection)
-            val s = members.fold(state) { acc, id -> acc.adoptingSearchResult(id) }
-            return Reduced(s.updatingSessionGroups { it.assigning(serverID, members, action.groupID) })
+            val unpinned = dropPin(state, action.sessionID, pinnedIndex = null)
+            return Reduced(movingSessions(unpinned, listOf(action.sessionID), action.groupID))
         }
 
         else -> return Reduced(state)
     }
+}
+
+private fun movingSessions(state: State, ids: List<String>, groupID: String?): State {
+    val serverID = state.server.persistenceID
+    val members = movableIDs(state, ids)
+    if (members.isEmpty()) return state
+    if (groupID != null && state.sessionGroups.group(serverID, groupID) == null) return state
+    dependency(HapticsClient).play(Haptic.selection)
+    val s = members.fold(state) { acc, id -> acc.adoptingSearchResult(id) }
+    return s.updatingSessionGroups { it.assigning(serverID, members, groupID) }
 }
 
 /** The root sessions among [ids] (listed, found by search, or unsent), once each. */

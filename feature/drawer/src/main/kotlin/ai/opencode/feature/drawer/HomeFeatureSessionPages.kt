@@ -330,6 +330,7 @@ internal fun State.adoptingSearchResultFor(action: Action): State {
         is Action.DeleteSessionTapped -> action.sessionID
         is Action.DrawerRowDropReleased -> action.sessionID
         is Action.DrawerRowDropped -> action.sessionID
+        is Action.DrawerRowDroppedInGroup -> action.sessionID
         else -> return this
     }
     return adoptingSearchResult(sessionID)

@@ -716,6 +716,8 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data class RemoveGroup(val groupID: String) : Action
         /** Puts [sessionIDs] in [groupID], or out of every group when it's null. Phone-local: nothing is sent. */
         data class MoveSessionsToGroup(val sessionIDs: List<String>, val groupID: String?) : Action
+        /** A dragged row dropped on a group, or on Recents when [groupID] is null: it shows there, unpinned. */
+        data class DrawerRowDroppedInGroup(val sessionID: String, val groupID: String?) : Action
         /** A computer paired for the first time: open the drawer on its sessions. */
         data object PairedComputerOpened : Action
         /** The install's first computer paired: a ready session in its latest project, with starter prompts. */
@@ -735,6 +737,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data class DrawerPinZoneCrossed(val entered: Boolean) : Action
         data object DrawerPinSlotChanged : Action
         data class DrawerRowDropReleased(val sessionID: String, val pinnedIndex: Int?) : Action
+        /** A null [pinnedIndex] unpins into Recents, which also takes the session out of its group. */
         data class DrawerRowDropped(val sessionID: String, val pinnedIndex: Int?) : Action
         data class DeleteSessionTapped(val sessionID: String) : Action
         data object DeleteSessionCancelled : Action

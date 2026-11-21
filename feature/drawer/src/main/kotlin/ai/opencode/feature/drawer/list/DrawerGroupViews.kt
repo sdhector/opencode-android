@@ -15,6 +15,7 @@ import ai.opencode.feature.drawer.HomeFeature
 import ai.opencode.feature.drawer.R
 import ai.opencode.feature.drawer.groups.SessionGroups
 import ai.opencode.feature.drawer.serverGroups
+import ai.opencode.feature.drawer.style.DrawerDropSlotRow
 import ai.opencode.feature.drawer.style.DrawerMetrics
 import ai.opencode.feature.drawer.style.DrawerTunables
 import androidx.compose.foundation.background
@@ -212,10 +213,10 @@ fun DrawerListNewGroupRow(pinDrag: DrawerPinDrag, onClick: () -> Unit, modifier:
     }
 }
 
-/** The group a dragged row is over, tinted across its header and sessions; beneath the rows, which stay clear of it. */
+/** The section a dragged row would land in, tinted across its header and sessions; beneath the rows, which stay clear of it. */
 @Composable
-internal fun DrawerGroupDropOverlay(pinDrag: DrawerPinDrag) {
-    val target = pinDrag.groupTarget ?: return
+internal fun DrawerSectionDropOverlay(pinDrag: DrawerPinDrag) {
+    val target = pinDrag.dropTarget ?: return
     val density = LocalDensity.current.density
     Box(
         Modifier
@@ -224,8 +225,32 @@ internal fun DrawerGroupDropOverlay(pinDrag: DrawerPinDrag) {
             .padding(horizontal = DrawerMetrics.rowEdge)
             .height(target.height.dp)
             .background(OpenCodeTheme.colors.signal.copy(alpha = 0.16f), RoundedCornerShape(DrawerMetrics.rowCornerRadius))
-            .testTag("drawer-group-drop-target"),
+            .testTag(if (target.groupID == null) "drawer-recents-drop-target" else "drawer-group-drop-target"),
     )
+}
+
+/** Recents' only row while a pinned or grouped row is lifted and Recents has none. Takes no touches. */
+@Composable
+fun DrawerRecentsDropSlot(pinDrag: DrawerPinDrag, modifier: Modifier = Modifier) {
+    val colors = OpenCodeTheme.colors
+    val density = LocalDensity.current
+    val label = stringResource(R.string.drawer_drop_to_recents)
+    val target = pinDrag.dropTarget
+    val hovered = target != null && target.groupID == null
+    DrawerDropSlotRow(
+        label = label,
+        openProgress = 1f,
+        hoverProgress = if (hovered) 1f else 0f,
+        modifier = modifier
+            .graphicsLayer {
+                translationY = pinDrag.translation(DrawerPinDrag.ItemKey.RecentsDrop) * density.density
+                alpha = pinDrag.alpha(DrawerPinDrag.ItemKey.RecentsDrop)
+            }
+            .testTag("drawer-recents-drop-slot")
+            .clearAndSetSemantics { contentDescription = label },
+    ) { isHovered ->
+        OpenCodeIcon(SFSymbol.Clock, contentDescription = null, tint = if (isHovered) colors.accent else colors.secondaryText)
+    }
 }
 
 /** Shows the dialog [editor] is asking for: name a group, confirm its removal, or choose a group for sessions. */

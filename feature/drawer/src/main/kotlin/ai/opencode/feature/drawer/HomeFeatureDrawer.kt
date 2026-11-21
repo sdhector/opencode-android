@@ -239,7 +239,13 @@ internal fun HomeFeature.reduceDrawer(state: State, action: Action): HomeReduced
             return Reduced(state)
         }
 
-        is Action.DrawerRowDropped -> return Reduced(dropPin(state, action.sessionID, action.pinnedIndex))
+        is Action.DrawerRowDropped -> {
+            var s = dropPin(state, action.sessionID, action.pinnedIndex)
+            if (action.pinnedIndex == null && state.isPinned(action.sessionID) && !s.isPinned(action.sessionID)) {
+                s = s.updatingSessionGroups { it.forgetting(state.server.persistenceID, action.sessionID) }
+            }
+            return Reduced(s)
+        }
 
         is Action.DeleteSessionTapped -> {
             val session = state.unsentDraft(action.sessionID)?.placeholderSession ?: state.sessions.firstOrNull { it.id == action.sessionID }

@@ -193,6 +193,8 @@ private fun HomeFeature.coreRoute(state: State, action: Action): Reduced<State, 
     is Action.MoveSessionsToGroup,
     -> reduceGroups(state, action)
 
+    is Action.DrawerRowDroppedInGroup -> reduceGroups(state.adoptingSearchResultFor(action), action)
+
     is Action.InAppNoticeExpired ->
         if (state.inAppNotice?.id != action.id) Reduced(state) else Reduced(state.copy(inAppNotice = null))
 

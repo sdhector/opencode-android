@@ -5,6 +5,7 @@ import ai.opencode.core.dependencies.DateClient
 import ai.opencode.core.dependencies.DependencyValues
 import ai.opencode.core.dependencies.ImmediateClock
 import ai.opencode.core.dependencies.UuidClient
+import ai.opencode.core.sharing.SharedKeys
 import ai.opencode.core.testing.TestIsolationRule
 import ai.opencode.feature.composer.PendingPrompt
 import ai.opencode.feature.composer.PromptOutbox
@@ -62,10 +63,10 @@ class SessionGroupsTests {
     private fun group(id: String, vararg members: String, collapsed: Boolean = false) =
         SessionGroup(id = id, name = "Group $id", isCollapsed = collapsed, sessionIDs = members.toList())
 
-    private fun HomeFeature.State.model(): DrawerListModel = DrawerListModel.build(
+    private fun HomeFeature.State.model(liftedID: String? = null): DrawerListModel = DrawerListModel.build(
         state = this,
         inputs = DrawerListInputs(selectedSessionID = null, reducedMotion = true, increasedContrast = false),
-        liftedID = null,
+        liftedID = liftedID,
         now = Instant.EPOCH,
         timestamp = { _, _ -> "" },
         project = { _, _ -> null },
@@ -306,6 +307,87 @@ class SessionGroupsTests {
         store.send(Action.ToggleGroupCollapsed("nope"))
         store.send(Action.RemoveGroup("nope"))
         assertTrue(store.state.serverGroups.isEmpty())
+    }
+
+    @Test
+    fun aDropPutsTheSessionWhereItWasDroppedAndAPinKeepsItsGroup() = homeTest { h ->
+        val sessions = listOf("a", "b", "c", "d", "e").mapIndexed { index, id -> session(id, 50L - index * 10) }
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        h.setShared(DrawerSharedKeys.sessionGroups, groups(group("g", "a", "b", "c"), group("h", "d")))
+        h.setShared(SharedKeys.pinnedSessionKeys, listOf(base.sessionKey("b"), base.sessionKey("c")))
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) })
+        store.exhaustive = false
+        fun place(id: String): String {
+            val drawer = store.state.drawerSessions
+            return when {
+                drawer.pinned.any { it.id == id } -> "pinned"
+                drawer.recents.any { it.id == id } -> "recents"
+                else -> drawer.groups.first { entry -> entry.sessions.any { it.id == id } }.group.id
+            }
+        }
+        assertEquals(listOf("pinned", "pinned", "g", "h", "recents"), listOf("b", "c", "a", "d", "e").map(::place))
+
+        store.send(Action.DrawerRowDroppedInGroup("a", null))
+        assertEquals("group → Recents", "recents", place("a"))
+        assertNull(store.state.groupID("a"))
+
+        store.send(Action.DrawerRowDropped("b", pinnedIndex = null))
+        assertEquals("pinned with a group → Recents: neither pin nor group", "recents", place("b"))
+        assertNull(store.state.groupID("b"))
+
+        store.send(Action.DrawerRowDroppedInGroup("c", "h"))
+        assertEquals("pinned with a group → another group", "h", place("c"))
+        assertFalse(store.state.isPinned("c"))
+
+        store.send(Action.DrawerRowDropped("d", pinnedIndex = 0))
+        assertEquals("group → Pinned", "pinned", place("d"))
+        assertEquals("the pin keeps its group", "h", store.state.groupID("d"))
+        store.send(Action.DrawerRowDroppedInGroup("d", "nope"))
+        assertEquals("an unknown group takes nothing, nor unpins", "pinned", place("d"))
+        store.send(Action.DrawerRowDroppedInGroup("d", "h"))
+        assertEquals("pinned → its own group", "h", place("d"))
+
+        store.send(Action.DrawerRowDroppedInGroup("e", "g"))
+        assertEquals("Recents → group", "g", place("e"))
+        store.send(Action.DrawerRowDroppedInGroup("e", "h"))
+        assertEquals("group → group", "h", place("e"))
+        assertEquals(listOf<String>(), store.state.serverGroups.first { it.id == "g" }.sessionIDs)
+
+        store.send(Action.DrawerRowDropped("e", pinnedIndex = 0))
+        store.send(Action.DrawerRowDropped("c", pinnedIndex = 0))
+        store.send(Action.DrawerRowDropped("e", pinnedIndex = 0))
+        assertEquals("a pin reorder keeps both groups", listOf("e", "c"), store.state.pinnedSessions.map { it.id })
+        assertEquals("h", store.state.groupID("c"))
+        store.send(Action.TogglePin("e"))
+        assertEquals("Unpin from the menu takes it back to its group", "h", place("e"))
+
+        val saved = h.shared(DrawerSharedKeys.sessionGroups)
+        assertEquals(listOf("c", "d", "e"), saved.group(serverID, "h")?.sessionIDs)
+        assertNull(saved.groupID(serverID, "a"))
+        assertNull(saved.groupID(serverID, "b"))
+        assertEquals("both groups survive", listOf("g", "h"), saved.groups(serverID).map { it.id })
+        assertEquals(listOf(base.sessionKey("c")), h.shared(SharedKeys.pinnedSessionKeys))
+        assertEquals("no session was renamed, moved, archived or dropped", sessions, store.state.sessions)
+    }
+
+    @Test
+    fun aLiftedRowSeesAnEmptyRecentsAsAPlaceToDrop() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30))
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        val state = base.copy(sessionGroups = groups(group("g", "a")), pinnedSessionKeys = listOf(base.sessionKey("b")))
+        val dropSlot = listOf(DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.RecentsDrop)
+
+        assertEquals("at rest an empty Recents doesn't show", emptyList<DrawerListItem>(), state.model().sections[DrawerListSection.recents])
+        assertEquals("lifting a grouped row", dropSlot, state.model(liftedID = "a").sections[DrawerListSection.recents])
+        assertEquals("lifting a pinned row", dropSlot, state.model(liftedID = "b").sections[DrawerListSection.recents])
+        assertEquals("while searching too", dropSlot, state.copy(search = "Title").model(liftedID = "a").sections[DrawerListSection.recents])
+
+        val withRecent = state.copy(sessions = sessions + session("c", 20))
+        assertEquals(
+            "Recents with rows needs no slot",
+            listOf(DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("c")),
+            withRecent.model(liftedID = "a").sections[DrawerListSection.recents],
+        )
     }
 
     @Test
