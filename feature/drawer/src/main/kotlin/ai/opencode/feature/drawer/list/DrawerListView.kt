@@ -269,6 +269,21 @@ fun DrawerListView(
                 }
             }
 
+            override fun groupAt(y: Float): String? {
+                val info = listState.layoutInfo
+                val offset = y * density.density + info.viewportStartOffset
+                val item = info.visibleItemsInfo.firstOrNull { offset >= it.offset && offset < it.offset + it.size }
+                return (item?.key as? String)?.takeIf { it.startsWith("group-") }?.removePrefix("group-")
+            }
+
+            override fun dropInGroup(sessionID: String, groupID: String) {
+                if (store.state.isPinned(sessionID)) {
+                    store.send(HomeFeature.Action.DrawerRowDropped(sessionID, null))
+                }
+                store.send(HomeFeature.Action.MoveSessionsToGroup(listOf(sessionID), groupID))
+                flushNow()
+            }
+
             override val width: Float get() = (listCoordinates[0]?.size?.width ?: 0) / density.density
 
             override val viewportTop: Float get() = -listState.layoutInfo.viewportStartOffset / density.density
@@ -456,7 +471,7 @@ fun DrawerListView(
                                 remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
                             )
                         }
-                        DrawerListGroupHeaderCell(header, groupActions)
+                        DrawerListGroupHeaderCell(header, groupActions, isDropTarget = pinDrag.hoveredGroupID == header.id)
                     }
                     DrawerListItem.NewGroup -> DrawerListNewGroupRow(onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) })
                     is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag)

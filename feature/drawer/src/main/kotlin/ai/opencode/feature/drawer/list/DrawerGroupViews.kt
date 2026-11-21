@@ -17,6 +17,7 @@ import ai.opencode.feature.drawer.groups.SessionGroups
 import ai.opencode.feature.drawer.serverGroups
 import ai.opencode.feature.drawer.style.DrawerMetrics
 import ai.opencode.feature.drawer.style.DrawerTunables
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -84,6 +85,7 @@ fun DrawerListGroupHeaderCell(
     header: DrawerListGroupHeader,
     actions: DrawerGroupHeaderActions,
     modifier: Modifier = Modifier,
+    isDropTarget: Boolean = false,
 ) {
     val colors = OpenCodeTheme.colors
     val count = pluralStringResource(R.plurals.drawer_group_session_count, header.count, header.count)
@@ -95,6 +97,7 @@ fun DrawerListGroupHeaderCell(
             .fillMaxWidth()
             .padding(horizontal = DrawerMetrics.rowEdge)
             .heightIn(min = DrawerMetrics.rowHeight)
+            .then(if (isDropTarget) Modifier.background(colors.signal.copy(alpha = 0.16f), RoundedCornerShape(DrawerMetrics.rowCornerRadius)) else Modifier)
             .testTag("drawer-group-${header.id}"),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -297,7 +297,7 @@ fun DrawerListSessionCell(
                 .drawerRowInteraction(
                     interaction = DrawerRowInteraction(
                         sessionID = row.session.id,
-                        reorderable = row.unsent == null && !row.inGroup,
+                        reorderable = row.unsent == null,
                         holdable = row.unsent == null,
                         isPinnedSection = row.isPinnedSection,
                         select = { currentActions.select() },
@@ -375,25 +375,12 @@ fun DrawerListSessionCell(
                         .padding(start = DrawerMetrics.textInset, end = DrawerMetrics.trailingInset),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // The check takes the project tile's place while the drawer selects.
-                    val side = DrawerListProjectTile.side(DrawerTunables.projectIconSize, density.fontScale)
                     SelectionLead(
                         checked = row.checked,
-                        restWidth = if (row.project != null) side + DrawerTunables.projectIconGap else 0.dp,
-                        selectWidth = side + DrawerTunables.projectIconGap,
+                        restWidth = 0.dp,
+                        selectWidth = 20.dp + DrawerTunables.projectIconGap,
                         checkSize = 20.dp,
-                    ) {
-                        if (row.project != null) {
-                            DrawerListProjectTile(
-                                project = row.project,
-                                server = row.server,
-                                muted = row.muted,
-                                side = side,
-                                increasedContrast = row.increasedContrast,
-                                reducedMotion = row.reducedMotion,
-                            )
-                        }
-                    }
+                    ) {}
                     DrawerListTitleView(
                         text = row.session.title,
                         style = titleStyle,

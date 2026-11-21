@@ -37,6 +37,10 @@ interface DrawerPinDragHost {
     /** The visible headers and rows, untransformed. */
     fun visibleItems(): List<DrawerPinDragItem>
 
+    fun groupAt(y: Float): String? = null
+
+    fun dropInGroup(sessionID: String, groupID: String) {}
+
     /** The list's width, dp. */
     val width: Float
 
@@ -130,6 +134,13 @@ class DrawerPinDrag {
     /** The empty-pins drop zone, while it shows. */
     var dropZone: DrawerPinDropZone? by mutableStateOf(null)
         internal set
+
+    var hoveredGroupID: String? by mutableStateOf(null)
+        private set
+
+    internal fun updateGroupHover(y: Float) {
+        hoveredGroupID = host?.let { if (y >= it.headerBottom && y < it.footerTop) it.groupAt(y) else null }
+    }
 
     /** The dragged row, while a drag or its landing runs. */
     var draggingID: String? by mutableStateOf(null)
@@ -318,6 +329,7 @@ class DrawerPinDrag {
             while (samples.isNotEmpty() && uptimeMillis - samples.first().first > 100) samples.removeFirst()
         }
         positionLiftedRowUnderFinger()
+        updateGroupHover(fingerY)
         evaluateHover(fingerY)
         retargetSprings()
     }
@@ -339,13 +351,20 @@ class DrawerPinDrag {
      * springs back anywhere else.
      */
     fun endDrag(fingerX: Float, fingerY: Float) {
-        if (activeSessionID == null || hasCommittedDrop) return
+        val sessionID = activeSessionID ?: return
+        if (hasCommittedDrop) return
         val host = host
         val listWidth = host?.width?.takeIf { it > 0f } ?: Float.MAX_VALUE
         val listHeight = host?.height?.takeIf { it > 0f } ?: Float.MAX_VALUE
         val headerBottom = host?.headerBottom ?: 0f
         val footerTop = host?.footerTop ?: Float.MAX_VALUE
         val overBody = fingerX in 0f..listWidth && fingerY >= headerBottom && fingerY <= footerTop
+        val groupID = if (overBody) host?.groupAt(fingerY) else null
+        if (groupID != null) {
+            resetAllCellsAndCleanup()
+            host?.dropInGroup(sessionID, groupID)
+            return
+        }
         val window = host?.window ?: Rect(Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
         val list = Rect(0f, 0f, listWidth, listHeight)
         if (!overBody && !landsOnCancel(Offset(fingerX, fingerY), list, headerBottom, footerTop, window)) {
@@ -389,6 +408,7 @@ class DrawerPinDrag {
      * springing shifted rows (the lifted one included) and any open empty-pin zone back to rest.
      */
     fun cancelDrag(deferLiftedClear: Boolean = false) {
+        hoveredGroupID = null
         landingFallback?.cancel()
         landingFallback = null
 
@@ -574,6 +594,7 @@ class DrawerPinDrag {
     }
 
     fun resetAllCellsAndCleanup() {
+        hoveredGroupID = null
         pinMove.cancel()
         landingFallback?.cancel()
         landingFallback = null
@@ -634,6 +655,7 @@ class DrawerPinDrag {
 
         if (autoScroll(dt)) {
             keyed = host.visibleItems()
+            updateGroupHover(lastFingerY)
             evaluateHover(lastFingerY)
         }
 
