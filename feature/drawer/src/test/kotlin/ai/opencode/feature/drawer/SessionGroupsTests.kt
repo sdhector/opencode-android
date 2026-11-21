@@ -22,6 +22,7 @@ import ai.opencode.feature.drawer.list.DrawerListInputs
 import ai.opencode.feature.drawer.list.DrawerListItem
 import ai.opencode.feature.drawer.list.DrawerListModel
 import ai.opencode.feature.drawer.list.DrawerListSection
+import ai.opencode.feature.drawer.style.DrawerSectionHeaderKind
 import ai.opencode.feature.session.BindingAction
 import ai.opencode.feature.session.SessionFeature
 import ai.opencode.feature.session.isDraft
@@ -170,6 +171,42 @@ class SessionGroupsTests {
         assertEquals(setOf("a", "b", "c"), ids.toSet())
         assertEquals("the pinned row still knows its group, for Remove from Group", "g", state.model().rows["b"]?.groupID)
         assertFalse(state.model().rows["b"]?.inGroup == true)
+    }
+
+    @Test
+    fun theListRunsPinnedThenGroupsThenRecents() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30), session("c", 20))
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        fun DrawerListModel.shown() = items.filter {
+            it is DrawerListItem.Header || it is DrawerListItem.Session || it is DrawerListItem.GroupHeader || it == DrawerListItem.NewGroup
+        }
+        val pinned = base.copy(pinnedSessionKeys = listOf(base.sessionKey("b")))
+
+        assertEquals(
+            listOf(
+                DrawerListItem.Header(DrawerSectionHeaderKind.Pinned), DrawerListItem.Session("b"),
+                DrawerListItem.GroupHeader("g"), DrawerListItem.Session("c"), DrawerListItem.NewGroup,
+                DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("a"),
+            ),
+            pinned.copy(sessionGroups = groups(group("g", "c"))).model().shown(),
+        )
+        assertEquals(
+            "without groups New Group still follows Pinned",
+            listOf(
+                DrawerListItem.Header(DrawerSectionHeaderKind.Pinned), DrawerListItem.Session("b"), DrawerListItem.NewGroup,
+                DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("a"), DrawerListItem.Session("c"),
+            ),
+            pinned.model().shown(),
+        )
+        assertEquals(
+            "with nothing pinned the groups lead",
+            listOf(
+                DrawerListItem.GroupHeader("g"), DrawerListItem.Session("c"), DrawerListItem.NewGroup,
+                DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("a"), DrawerListItem.Session("b"),
+            ),
+            base.copy(sessionGroups = groups(group("g", "c"))).model().shown(),
+        )
+        assertEquals("the pin drag is told which sessions each group shows", listOf("c"), pinned.copy(sessionGroups = groups(group("g", "c"))).model().groupHeaders["g"]?.sessionIDs)
     }
 
     @Test

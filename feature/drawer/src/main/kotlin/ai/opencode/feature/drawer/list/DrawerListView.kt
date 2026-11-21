@@ -269,13 +269,6 @@ fun DrawerListView(
                 }
             }
 
-            override fun groupAt(y: Float): String? {
-                val info = listState.layoutInfo
-                val offset = y * density.density + info.viewportStartOffset
-                val item = info.visibleItemsInfo.firstOrNull { offset >= it.offset && offset < it.offset + it.size }
-                return (item?.key as? String)?.takeIf { it.startsWith("group-") }?.removePrefix("group-")
-            }
-
             override fun dropInGroup(sessionID: String, groupID: String) {
                 if (store.state.isPinned(sessionID)) {
                     store.send(HomeFeature.Action.DrawerRowDropped(sessionID, null))
@@ -343,6 +336,8 @@ fun DrawerListView(
             showsShortcuts = state.search.isEmpty() && (model.shortcuts.showsCatchUp || model.shortcuts.showsWhatsNew),
             reducedMotion = currentInputs.value.reducedMotion,
             fingerY = fingerY,
+            groups = model.groupHeaders.values.map { DrawerPinGroup(it.id, it.sessionIDs) },
+            showsNewGroup = DrawerListItem.NewGroup in model.items,
             onZoneCrossed = { store.send(HomeFeature.Action.DrawerPinZoneCrossed(it)) },
             onSlotChanged = { store.send(HomeFeature.Action.DrawerPinSlotChanged) },
             onDropReleased = { sessionID, index -> store.send(HomeFeature.Action.DrawerRowDropReleased(sessionID, index)) },
@@ -422,6 +417,7 @@ fun DrawerListView(
         // Beneath the rows: they move out of its way, and the lifted row (drawn in the list) stays
         // above it.
         DrawerPinDropZoneOverlay(pinDrag)
+        DrawerGroupDropOverlay(pinDrag)
         LazyColumn(
             state = listState,
             contentPadding = contentPadding,
@@ -471,9 +467,9 @@ fun DrawerListView(
                                 remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
                             )
                         }
-                        DrawerListGroupHeaderCell(header, groupActions, isDropTarget = pinDrag.hoveredGroupID == header.id)
+                        DrawerListGroupHeaderCell(header, groupActions, pinDrag)
                     }
-                    DrawerListItem.NewGroup -> DrawerListNewGroupRow(onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) })
+                    DrawerListItem.NewGroup -> DrawerListNewGroupRow(pinDrag, onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) })
                     is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag)
                     DrawerListItem.Empty -> DrawerListEmptyRow(current.search)
                     DrawerListItem.Footer -> DrawerListFooterRow(
@@ -627,6 +623,8 @@ private fun pinDragKey(key: Any): DrawerPinDrag.ItemKey? {
         text.startsWith("session-") -> DrawerPinDrag.ItemKey.Row(text.removePrefix("session-"))
         text == DrawerListItem.Header(DrawerSectionHeaderKind.Pinned).key -> DrawerPinDrag.ItemKey.PinnedHeader
         text == DrawerListItem.Header(DrawerSectionHeaderKind.Recents).key -> DrawerPinDrag.ItemKey.RecentsHeader
+        text == DrawerListItem.NewGroup.key -> DrawerPinDrag.ItemKey.NewGroup
+        text.startsWith("group-") -> DrawerPinDrag.ItemKey.GroupHeader(text.removePrefix("group-"))
         else -> null
     }
 }

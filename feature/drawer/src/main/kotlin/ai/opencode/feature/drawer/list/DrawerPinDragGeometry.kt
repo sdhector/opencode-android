@@ -43,6 +43,9 @@ internal fun DrawerPinDrag.captureInitialGeometry() {
         }
     }
 
+    // What follows Pinned: the group section when it shows, else Recents.
+    val afterPinned = keyed.firstOrNull { it.key == (sectionLead ?: ItemKey.RecentsHeader) }
+
     if (pinnedIDs.isEmpty()) {
         val hasRecentsHeader = DrawerTunables.sectionBreak == DrawerSectionBreak.Header ||
             showsShortcuts || recentsHeader != null
@@ -53,6 +56,7 @@ internal fun DrawerPinDrag.captureInitialGeometry() {
         }
         cachedFirstRecentMinY = firstRecentMinY
         cachedTopMinY = when {
+            sectionLead != null -> afterPinned?.minY ?: scrolledOutTopMinY()
             recentsHeader != null -> recentsHeader.minY
             hasRecentsHeader -> firstRecentMinY - cachedHeaderHeight
             else -> firstRecentMinY
@@ -62,8 +66,8 @@ internal fun DrawerPinDrag.captureInitialGeometry() {
         val firstPinnedMinY = when {
             visiblePinnedAnchor != null -> visiblePinnedAnchor.second - visiblePinnedAnchor.first * stride
             pinnedHeader != null -> pinnedHeader.maxY
-            recentsHeader != null -> recentsHeader.minY - pinnedIDs.size * stride
-            visibleRecentAnchor != null -> {
+            afterPinned != null -> afterPinned.minY - pinnedIDs.size * stride
+            sectionLead == null && visibleRecentAnchor != null -> {
                 val firstRecentMinY = visibleRecentAnchor.second - visibleRecentAnchor.first * stride
                 firstRecentMinY - cachedHeaderHeight - pinnedIDs.size * stride
             }
@@ -82,9 +86,71 @@ internal fun DrawerPinDrag.captureInitialGeometry() {
     for (item in keyed) cellSprings[item.key] = makeSpring(item.minY, item.minY)
 }
 
+/** How far above the viewport the empty slot's top may sit and still count as in view, dp. */
+private const val TOP_VISIBLE_SLACK = 8f
+
 private fun DrawerPinDrag.isTopOfListVisible(): Boolean {
     val visibleTopY = host?.viewportTop ?: 0f
-    return cachedTopMinY >= visibleTopY - 8
+    return cachedTopMinY >= visibleTopY - TOP_VISIBLE_SLACK
+}
+
+/** The empty slot's top when the group section that sets it has scrolled out: above the list. */
+private fun DrawerPinDrag.scrolledOutTopMinY(): Float =
+    (host?.viewportTop ?: 0f) - cachedHeaderHeight - TOP_VISIBLE_SLACK - 1f
+
+/** Scrolling brings the group section's first row into view: the empty slot's top is where it shows. */
+internal fun DrawerPinDrag.refreshEmptySlot(keyed: List<DrawerPinDragItem>) {
+    if (pinnedIDs.isNotEmpty()) return
+    val lead = sectionLead?.let { key -> keyed.firstOrNull { it.key == key } } ?: return
+    cachedTopMinY = lead.minY
+    cachedFirstPinnedMinY = lead.minY + cachedHeaderHeight
+}
+
+private fun DrawerPinDrag.groupOf(key: ItemKey): String? = when (key) {
+    is ItemKey.GroupHeader -> key.id
+    // The lifted row follows the finger: it is no part of the group it came from.
+    is ItemKey.Row -> if (key.id == activeSessionID) null else groupOfSession[key.id]
+    else -> null
+}
+
+/** Each group's header and sessions as they show now: the layout places plus the drag's shifts. */
+private fun DrawerPinDrag.groupSpans(): List<DrawerPinGroupTarget> {
+    val tops = LinkedHashMap<String, Float>()
+    val bottoms = HashMap<String, Float>()
+    for (item in visibleItems()) {
+        val id = groupOf(item.key) ?: continue
+        val top = item.minY + translation(item.key)
+        tops[id] = min(tops[id] ?: top, top)
+        bottoms[id] = max(bottoms[id] ?: Float.NEGATIVE_INFINITY, top + item.height)
+    }
+    return tops.map { (id, top) -> DrawerPinGroupTarget(id, top, bottoms.getValue(id) - top) }
+}
+
+private fun DrawerPinDrag.groupTargetAt(y: Float): DrawerPinGroupTarget? {
+    val host = host ?: return null
+    if (y < host.headerBottom || y >= host.footerTop) return null
+    // Dropping a session on the group it is already in changes nothing, so that group is no target.
+    val ownGroupID = activeSessionID?.let { groupOfSession[it] }
+    return groupSpans().firstOrNull { it.id != ownGroupID && y >= it.top && y < it.top + it.height }
+}
+
+/** The group under [y] (list dp): its header, or any session showing under it. */
+internal fun DrawerPinDrag.groupAt(y: Float): String? = groupTargetAt(y)?.id
+
+/**
+ * The finger is at [fingerY]: over a group it is that group's drop, otherwise it hovers a pin
+ * slot. A group and the pin slot are never both targets, so the slot closes under a held finger
+ * (a pinned row's own slot stays, so its neighbours don't slide away from it).
+ */
+internal fun DrawerPinDrag.refreshHover(fingerY: Float) {
+    val target = groupTargetAt(fingerY)
+    groupTarget = target
+    if (target == null) {
+        evaluateHover(fingerY)
+    } else if (!startedInPinned && hoverTarget != HoverTarget.Recent) {
+        hoverTarget = HoverTarget.Recent
+        notifyZoneCrossed(false)
+    }
 }
 
 internal fun DrawerPinDrag.evaluateHover(fingerY: Float) {
@@ -194,42 +260,38 @@ private fun DrawerPinDrag.targetShift(item: DrawerPinDragItem): Float {
     val sectionHeight = cachedHeaderHeight
     val key = item.key
 
-    // Scenario B: empty pins, dragging a recent row.
-    if (pinnedIDs.isEmpty() && !startedInPinned) {
-        val zoneTarget = targetEmptyZoneOpenHeight()
-        return when (key) {
-            ItemKey.PinnedHeader -> 0f
-            ItemKey.RecentsHeader -> zoneTarget
-            is ItemKey.Row -> {
-                if (key.id == draggedID) {
-                    return if (hoverTarget != HoverTarget.Recent) (cachedTopMinY + sectionHeight) - item.minY else 0f
-                }
-                val j = recentIDs.indexOf(key.id)
-                if (j < 0) return zoneTarget
-                if (hoverTarget != HoverTarget.Recent) {
-                    if (j < recentInsertionIndex) sectionHeight + stride else sectionHeight
-                } else {
-                    zoneTarget
-                }
-            }
-        }
-    }
-
-    // Scenario A: existing pins, dragging a recent row.
+    // Dragging a row from Recents or a group. It leaves a hole where it was, which what shows
+    // below it closes up to fill when it takes a Pinned slot; everything above it, the group
+    // section included, makes room.
     if (!startedInPinned) {
-        val k = (hoverTarget as? HoverTarget.Pinned)?.index ?: return 0f
-        return when (key) {
-            ItemKey.PinnedHeader -> 0f
-            ItemKey.RecentsHeader -> stride
-            is ItemKey.Row -> {
-                if (key.id == draggedID) return (cachedFirstPinnedMinY + k * stride) - item.minY
-                val pinIdx = otherPinnedIDs.indexOf(key.id)
-                if (pinIdx >= 0) return if (pinIdx >= k) stride else 0f
-                val recIdx = recentIDs.indexOf(key.id)
-                if (recIdx >= 0) return if (recIdx < recentInsertionIndex) stride else 0f
-                0f
+        val draggedMinY = visibleItem(ItemKey.Row(draggedID))?.minY ?: return 0f
+        val isBelowDragged = item.minY > draggedMinY
+
+        // Scenario B: empty pins.
+        if (pinnedIDs.isEmpty()) {
+            val zoneTarget = targetEmptyZoneOpenHeight()
+            if (key == ItemKey.PinnedHeader) return 0f
+            if (key is ItemKey.Row && key.id == draggedID) {
+                return if (hoverTarget != HoverTarget.Recent) (cachedTopMinY + sectionHeight) - item.minY else 0f
+            }
+            return if (hoverTarget == HoverTarget.Recent) {
+                zoneTarget
+            } else if (isBelowDragged) {
+                sectionHeight
+            } else {
+                sectionHeight + stride
             }
         }
+
+        // Scenario A: existing pins.
+        val k = (hoverTarget as? HoverTarget.Pinned)?.index ?: return 0f
+        if (key == ItemKey.PinnedHeader) return 0f
+        if (key is ItemKey.Row) {
+            if (key.id == draggedID) return (cachedFirstPinnedMinY + k * stride) - item.minY
+            val pinIdx = otherPinnedIDs.indexOf(key.id)
+            if (pinIdx >= 0) return if (pinIdx >= k) stride else 0f
+        }
+        return if (isBelowDragged) 0f else stride
     }
 
     // Scenarios C & D: started in Pinned.
@@ -238,7 +300,7 @@ private fun DrawerPinDrag.targetShift(item: DrawerPinDragItem): Float {
         is HoverTarget.Pinned -> {
             val k = hover.index
             return when (key) {
-                ItemKey.PinnedHeader, ItemKey.RecentsHeader -> 0f
+                ItemKey.PinnedHeader, ItemKey.RecentsHeader, is ItemKey.GroupHeader, ItemKey.NewGroup -> 0f
                 is ItemKey.Row -> {
                     if (key.id == draggedID) return (k - p) * stride
                     val origIdx = pinnedIDs.indexOf(key.id)
@@ -254,13 +316,14 @@ private fun DrawerPinDrag.targetShift(item: DrawerPinDragItem): Float {
                 // Scenario C: at least one other pin remains.
                 return when (key) {
                     ItemKey.PinnedHeader -> 0f
-                    ItemKey.RecentsHeader -> -stride
+                    ItemKey.RecentsHeader, is ItemKey.GroupHeader, ItemKey.NewGroup -> -stride
                     is ItemKey.Row -> {
                         if (key.id == draggedID) {
                             return recentSlotMinY(recentInsertionIndex, shiftBeforeR = -stride) - item.minY
                         }
                         val origPinIdx = pinnedIDs.indexOf(key.id)
                         if (origPinIdx >= 0) return if (origPinIdx > p) -stride else 0f
+                        if (key.id in groupOfSession) return -stride
                         val recIdx = recentIDs.indexOf(key.id)
                         if (recIdx >= 0) return if (recIdx < recentInsertionIndex) -stride else 0f
                         0f
@@ -271,11 +334,12 @@ private fun DrawerPinDrag.targetShift(item: DrawerPinDragItem): Float {
             val shiftBeforeR = -(sectionHeight + stride)
             return when (key) {
                 ItemKey.PinnedHeader -> -sectionHeight * 0.25f
-                ItemKey.RecentsHeader -> shiftBeforeR
+                ItemKey.RecentsHeader, is ItemKey.GroupHeader, ItemKey.NewGroup -> shiftBeforeR
                 is ItemKey.Row -> {
                     if (key.id == draggedID) {
                         return recentSlotMinY(recentInsertionIndex, shiftBeforeR) - item.minY
                     }
+                    if (key.id in groupOfSession) return shiftBeforeR
                     val recIdx = recentIDs.indexOf(key.id)
                     if (recIdx >= 0) return if (recIdx < recentInsertionIndex) shiftBeforeR else -sectionHeight
                     0f

@@ -37,8 +37,7 @@ interface DrawerPinDragHost {
     /** The visible headers and rows, untransformed. */
     fun visibleItems(): List<DrawerPinDragItem>
 
-    fun groupAt(y: Float): String? = null
-
+    /** Moves the dragged session into a group, unpinning it. */
     fun dropInGroup(sessionID: String, groupID: String) {}
 
     /** The list's width, dp. */
@@ -88,6 +87,12 @@ data class DrawerPinDropZone(
     val reducedMotion: Boolean,
 )
 
+/** A group as the list shows it: the sessions under its header, in order. */
+data class DrawerPinGroup(val id: String, val sessionIDs: List<String>)
+
+/** The group a dragged row is over: the span its header and sessions show in now. */
+data class DrawerPinGroupTarget(val id: String, val top: Float, val height: Float)
+
 @Stable
 class DrawerPinDrag {
     sealed interface HoverTarget {
@@ -98,6 +103,8 @@ class DrawerPinDrag {
     sealed interface ItemKey {
         data object PinnedHeader : ItemKey
         data object RecentsHeader : ItemKey
+        data class GroupHeader(val id: String) : ItemKey
+        data object NewGroup : ItemKey
         data class Row(val id: String) : ItemKey
     }
 
@@ -135,12 +142,9 @@ class DrawerPinDrag {
     var dropZone: DrawerPinDropZone? by mutableStateOf(null)
         internal set
 
-    var hoveredGroupID: String? by mutableStateOf(null)
-        private set
-
-    internal fun updateGroupHover(y: Float) {
-        hoveredGroupID = host?.let { if (y >= it.headerBottom && y < it.footerTop) it.groupAt(y) else null }
-    }
+    /** The group the dragged row is over, highlighted beneath the rows. */
+    var groupTarget: DrawerPinGroupTarget? by mutableStateOf(null)
+        internal set
 
     /** The dragged row, while a drag or its landing runs. */
     var draggingID: String? by mutableStateOf(null)
@@ -174,6 +178,10 @@ class DrawerPinDrag {
     internal var otherPinnedIDs: List<String> = emptyList()
     internal var recentIDs: List<String> = emptyList()
     internal var recentInsertionIndex = 0
+    /** The group each session showing in one is under. */
+    internal var groupOfSession: Map<String, String> = emptyMap()
+    /** The group section's first row, which follows Pinned; null while the section is empty. */
+    internal var sectionLead: ItemKey? = null
     internal var showsShortcuts = false
     internal var reducedMotion = false
 
@@ -259,6 +267,8 @@ class DrawerPinDrag {
         showsShortcuts: Boolean,
         reducedMotion: Boolean,
         fingerY: Float,
+        groups: List<DrawerPinGroup> = emptyList(),
+        showsNewGroup: Boolean = false,
         onZoneCrossed: (Boolean) -> Unit,
         onSlotChanged: () -> Unit,
         onDropReleased: (String, Int?) -> Unit = { _, _ -> },
@@ -275,6 +285,8 @@ class DrawerPinDrag {
         otherPinnedIDs = pinnedIDs.filter { it != sessionID }
         this.recentIDs = recentIDs
         recentInsertionIndex = unpinnedRecentsIndex.coerceIn(0, recentIDs.size)
+        groupOfSession = groups.flatMap { group -> group.sessionIDs.map { it to group.id } }.toMap()
+        sectionLead = groups.firstOrNull()?.let { ItemKey.GroupHeader(it.id) } ?: ItemKey.NewGroup.takeIf { showsNewGroup }
         this.showsShortcuts = showsShortcuts
         this.reducedMotion = reducedMotion
         this.onZoneCrossed = onZoneCrossed
@@ -329,8 +341,7 @@ class DrawerPinDrag {
             while (samples.isNotEmpty() && uptimeMillis - samples.first().first > 100) samples.removeFirst()
         }
         positionLiftedRowUnderFinger()
-        updateGroupHover(fingerY)
-        evaluateHover(fingerY)
+        refreshHover(fingerY)
         retargetSprings()
     }
 
@@ -359,7 +370,7 @@ class DrawerPinDrag {
         val headerBottom = host?.headerBottom ?: 0f
         val footerTop = host?.footerTop ?: Float.MAX_VALUE
         val overBody = fingerX in 0f..listWidth && fingerY >= headerBottom && fingerY <= footerTop
-        val groupID = if (overBody) host?.groupAt(fingerY) else null
+        val groupID = if (overBody) groupAt(fingerY) else null
         if (groupID != null) {
             resetAllCellsAndCleanup()
             host?.dropInGroup(sessionID, groupID)
@@ -408,7 +419,7 @@ class DrawerPinDrag {
      * springing shifted rows (the lifted one included) and any open empty-pin zone back to rest.
      */
     fun cancelDrag(deferLiftedClear: Boolean = false) {
-        hoveredGroupID = null
+        groupTarget = null
         landingFallback?.cancel()
         landingFallback = null
 
@@ -594,7 +605,7 @@ class DrawerPinDrag {
     }
 
     fun resetAllCellsAndCleanup() {
-        hoveredGroupID = null
+        groupTarget = null
         pinMove.cancel()
         landingFallback?.cancel()
         landingFallback = null
@@ -655,8 +666,8 @@ class DrawerPinDrag {
 
         if (autoScroll(dt)) {
             keyed = host.visibleItems()
-            updateGroupHover(lastFingerY)
-            evaluateHover(lastFingerY)
+            refreshEmptySlot(keyed)
+            refreshHover(lastFingerY)
         }
 
         retargetSprings(keyed)
@@ -690,6 +701,8 @@ class DrawerPinDrag {
         }
 
         updateEmptyZone()
+        // The rows move under a held finger: the group it's over follows where they show.
+        if (activeSessionID != null && !hasCommittedDrop && !isLandingPlatter) refreshHover(lastFingerY)
 
         // The lifted row has landed in its slot: commit.
         if (isLandingPlatter && !hasCommittedDrop) {

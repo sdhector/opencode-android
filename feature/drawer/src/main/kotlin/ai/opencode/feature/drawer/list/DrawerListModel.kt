@@ -26,7 +26,7 @@ import java.time.Instant
  * `DrawerTunables` are constants here, so rows read them directly.
  */
 
-enum class DrawerListSection { top, groups, pinned, recents }
+enum class DrawerListSection { top, pinned, groups, recents }
 
 sealed interface DrawerListItem {
     data object CatchUp : DrawerListItem
@@ -120,6 +120,8 @@ data class DrawerListGroupHeader(
     val count: Int,
     /** Closed: its sessions don't show. Searching opens every group that has a match. */
     val isCollapsed: Boolean,
+    /** The sessions showing under it, in order: none while it is closed. */
+    val sessionIDs: List<String> = emptyList(),
 )
 
 /** What the list shows besides its rows. */
@@ -166,8 +168,7 @@ data class DrawerListModel(
     val items: List<DrawerListItem> get() = order.flatMap { sections[it].orEmpty() }
 
     companion object {
-        /** Groups sit above Pinned so the pin drag still sees Pinned and Recents back to back. */
-        val order = listOf(DrawerListSection.top, DrawerListSection.groups, DrawerListSection.pinned, DrawerListSection.recents)
+        val order = listOf(DrawerListSection.top, DrawerListSection.pinned, DrawerListSection.groups, DrawerListSection.recents)
         const val ghostCount = 5
 
         /**
@@ -192,8 +193,8 @@ data class DrawerListModel(
                     return DrawerListModel(
                         sections = mapOf(
                             DrawerListSection.top to emptyList(),
-                            DrawerListSection.groups to emptyList(),
                             DrawerListSection.pinned to emptyList(),
+                            DrawerListSection.groups to emptyList(),
                             DrawerListSection.recents to listOf(DrawerListItem.Header(DrawerSectionHeaderKind.Recents)) +
                                 (0 until ghostCount).map { DrawerListItem.Ghost(it) },
                         ),
@@ -264,7 +265,7 @@ data class DrawerListModel(
             val showsGroupSection = !searching || sessions.groups.any { it.sessions.isNotEmpty() }
             val pinnedItems = mutableListOf<DrawerListItem>()
             if (pinned.isNotEmpty()) {
-                pinnedItems += header(DrawerSectionHeaderKind.Pinned, follows = showsShortcuts || showsGroupSection)
+                pinnedItems += header(DrawerSectionHeaderKind.Pinned, follows = showsShortcuts)
                 for (session in pinned) {
                     rows[session.id] = row(session, pinned = true)
                     pinnedItems += DrawerListItem.Session(session.id)
@@ -303,7 +304,13 @@ data class DrawerListModel(
                 val count = unsentHere.size + listed.size
                 if (searching && count == 0) continue
                 val collapsed = entry.group.isCollapsed && !searching
-                groupHeaders[id] = DrawerListGroupHeader(id = id, name = entry.group.name, count = count, isCollapsed = collapsed)
+                groupHeaders[id] = DrawerListGroupHeader(
+                    id = id,
+                    name = entry.group.name,
+                    count = count,
+                    isCollapsed = collapsed,
+                    sessionIDs = if (collapsed) emptyList() else unsentHere.map { it.session.id } + listed.map { it.id },
+                )
                 groupItems += DrawerListItem.GroupHeader(id)
                 if (collapsed) continue
                 for (unsent in unsentHere) {
@@ -341,8 +348,8 @@ data class DrawerListModel(
             return DrawerListModel(
                 sections = mapOf(
                     DrawerListSection.top to top,
-                    DrawerListSection.groups to groupItems,
                     DrawerListSection.pinned to pinnedItems,
+                    DrawerListSection.groups to groupItems,
                     DrawerListSection.recents to recentItems,
                 ),
                 rows = rows,

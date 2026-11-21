@@ -24,7 +24,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
@@ -40,6 +42,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -51,7 +55,9 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 
 /*
  * Local Session Groups' list rows and dialogs. A group is a phone-side bundle: every action here
@@ -84,10 +90,12 @@ class DrawerGroupHeaderActions(
 fun DrawerListGroupHeaderCell(
     header: DrawerListGroupHeader,
     actions: DrawerGroupHeaderActions,
+    pinDrag: DrawerPinDrag,
     modifier: Modifier = Modifier,
-    isDropTarget: Boolean = false,
 ) {
     val colors = OpenCodeTheme.colors
+    val density = LocalDensity.current
+    val key = DrawerPinDrag.ItemKey.GroupHeader(header.id)
     val count = pluralStringResource(R.plurals.drawer_group_session_count, header.count, header.count)
     val state = stringResource(if (header.isCollapsed) R.string.drawer_group_collapsed_state else R.string.drawer_group_expanded_state)
     var menuOpen by remember { mutableStateOf(false) }
@@ -95,9 +103,12 @@ fun DrawerListGroupHeaderCell(
     Row(
         modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                translationY = pinDrag.translation(key) * density.density
+                alpha = pinDrag.alpha(key)
+            }
             .padding(horizontal = DrawerMetrics.rowEdge)
             .heightIn(min = DrawerMetrics.rowHeight)
-            .then(if (isDropTarget) Modifier.background(colors.signal.copy(alpha = 0.16f), RoundedCornerShape(DrawerMetrics.rowCornerRadius)) else Modifier)
             .testTag("drawer-group-${header.id}"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -170,12 +181,17 @@ fun DrawerListGroupHeaderCell(
 
 /** The row that ends the group section: New Group. */
 @Composable
-fun DrawerListNewGroupRow(onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun DrawerListNewGroupRow(pinDrag: DrawerPinDrag, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val colors = OpenCodeTheme.colors
+    val density = LocalDensity.current
     val label = stringResource(R.string.drawer_group_new)
     Row(
         modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                translationY = pinDrag.translation(DrawerPinDrag.ItemKey.NewGroup) * density.density
+                alpha = pinDrag.alpha(DrawerPinDrag.ItemKey.NewGroup)
+            }
             .padding(horizontal = DrawerMetrics.rowEdge)
             .clip(RoundedCornerShape(DrawerMetrics.rowCornerRadius))
             .clickable(role = Role.Button, onClick = onClick)
@@ -194,6 +210,22 @@ fun DrawerListNewGroupRow(onClick: () -> Unit, modifier: Modifier = Modifier) {
         OpenCodeIcon(SFSymbol.FolderBadgePlus, contentDescription = null, tint = colors.secondaryText)
         Text(label, style = DrawerTunables.rowFont.font, color = colors.secondaryText)
     }
+}
+
+/** The group a dragged row is over, tinted across its header and sessions; beneath the rows, which stay clear of it. */
+@Composable
+internal fun DrawerGroupDropOverlay(pinDrag: DrawerPinDrag) {
+    val target = pinDrag.groupTarget ?: return
+    val density = LocalDensity.current.density
+    Box(
+        Modifier
+            .offset { IntOffset(0, (target.top * density).roundToInt()) }
+            .fillMaxWidth()
+            .padding(horizontal = DrawerMetrics.rowEdge)
+            .height(target.height.dp)
+            .background(OpenCodeTheme.colors.signal.copy(alpha = 0.16f), RoundedCornerShape(DrawerMetrics.rowCornerRadius))
+            .testTag("drawer-group-drop-target"),
+    )
 }
 
 /** Shows the dialog [editor] is asking for: name a group, confirm its removal, or choose a group for sessions. */
