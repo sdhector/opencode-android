@@ -111,6 +111,8 @@ class DrawerListRowActions(
     val delete: () -> Unit,
     val movePinUp: () -> Unit,
     val movePinDown: () -> Unit,
+    val moveToGroup: () -> Unit,
+    val removeFromGroup: () -> Unit,
 )
 
 /** The time reveal as the rows read it: the list springs it back from where it is on release. */
@@ -150,6 +152,8 @@ fun DrawerListSessionCell(
     val deleteLabel = stringResource(CoreR.string.common_delete)
     val moveUpLabel = stringResource(R.string.drawer_move_up)
     val moveDownLabel = stringResource(R.string.drawer_move_down)
+    val moveToGroupLabel = stringResource(R.string.drawer_group_move)
+    val removeFromGroupLabel = stringResource(R.string.drawer_group_remove_from)
 
     // A row leaving the list mid-drag or mid-landing ends it.
     DisposableEffect(row.session.id) {
@@ -293,7 +297,7 @@ fun DrawerListSessionCell(
                 .drawerRowInteraction(
                     interaction = DrawerRowInteraction(
                         sessionID = row.session.id,
-                        reorderable = row.unsent == null,
+                        reorderable = row.unsent == null && !row.inGroup,
                         holdable = row.unsent == null,
                         isPinnedSection = row.isPinnedSection,
                         select = { currentActions.select() },
@@ -332,6 +336,10 @@ fun DrawerListSessionCell(
                             add(CustomAccessibilityAction(readLabel) { currentActions.toggleRead(); true })
                             add(CustomAccessibilityAction(muteLabel) { currentActions.toggleMute(); true })
                             add(CustomAccessibilityAction(hideLabel) { currentActions.toggleHidden(); true })
+                            add(CustomAccessibilityAction(moveToGroupLabel) { currentActions.moveToGroup(); true })
+                            if (row.groupID != null) {
+                                add(CustomAccessibilityAction(removeFromGroupLabel) { currentActions.removeFromGroup(); true })
+                            }
                         }
                         add(CustomAccessibilityAction(deleteLabel) { currentActions.delete(); true })
                         if (row.isPinnedSection) {

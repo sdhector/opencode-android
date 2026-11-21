@@ -26,6 +26,7 @@ import ai.opencode.core.ui.OpenCodeTheme
 import ai.opencode.core.ui.SFSymbol
 import ai.opencode.core.ui.openCodeTapTarget
 import ai.opencode.core.ui.rememberHighContrast
+import ai.opencode.feature.drawer.list.DrawerGroupDialogs
 import ai.opencode.feature.drawer.list.DrawerListActions
 import ai.opencode.feature.drawer.list.DrawerListInputs
 import ai.opencode.feature.drawer.list.DrawerListView
@@ -272,6 +273,8 @@ fun HomeDrawer(
             openWhatsNew = viewState::openWhatsNew,
             hideWhatsNew = { store.send(HomeFeature.Action.WhatsNew(WhatsNewFeature.Action.HideTapped)) },
             openArchived = openArchived,
+            newSessionInGroup = viewState::startNewSessionInGroup,
+            editGroups = { viewState.groupEditor.request = it },
         )
     }
 
@@ -355,7 +358,10 @@ fun HomeDrawer(
                 SelectionHeaderSwap(
                     active = selection.isActive,
                     bar = {
-                        val (main, overflow) = selectionActions(store, selection, pins = !inboxSidebarOn)
+                        val (main, overflow) = selectionActions(
+                            store, selection, pins = !inboxSidebarOn,
+                            groupEditor = viewState.groupEditor.takeIf { !inboxSidebarOn },
+                        )
                         DrawerSelectionBar(count = shownCount, onClose = selection::clear, actions = main, overflow = overflow)
                     },
                 ) {
@@ -452,6 +458,7 @@ fun HomeDrawer(
 
     if (hostsDeleteConfirmation) HomeDeleteConfirmation(store)
     DeleteSelectionConfirmation(store, selection)
+    DrawerGroupDialogs(store, viewState.groupEditor)
 }
 
 /**

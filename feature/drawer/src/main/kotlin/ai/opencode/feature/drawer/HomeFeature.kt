@@ -12,6 +12,9 @@ import ai.opencode.core.store.PresentationAction
 import ai.opencode.core.store.Reduced
 import ai.opencode.core.store.Reducer
 import ai.opencode.feature.drawer.catchup.CatchUpFeature
+import ai.opencode.feature.drawer.groups.DraftGroupTarget
+import ai.opencode.feature.drawer.groups.DrawerSharedKeys
+import ai.opencode.feature.drawer.groups.SessionGroups
 import ai.opencode.devtools.traces.TraceUploadsFeature
 import ai.opencode.feature.session.InAppNotice
 import ai.opencode.feature.composer.ComposerPersistence
@@ -147,6 +150,10 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         val mutedSessionKeys: Set<String> = emptySet(),
         /** Mirror of `SharedKeys.hiddenSessionKeys`. */
         val hiddenSessionKeys: Set<String> = emptySet(),
+        /** Mirror of `DrawerSharedKeys.sessionGroups`. */
+        val sessionGroups: SessionGroups = SessionGroups(),
+        /** The group the open draft's first send puts its session in (Local Session Groups). */
+        val draftGroup: DraftGroupTarget? = null,
         /** Mirror of `SharedKeys.sidebarShown`: beside a wide window's sidebar, whether it shows. */
         val isSidebarShown: Boolean = true,
         /**
@@ -580,6 +587,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
                     manuallyUnreadSessionKeys = shared(SharedKeys.manuallyUnreadSessionKeys).value,
                     mutedSessionKeys = shared(SharedKeys.mutedSessionKeys).value,
                     hiddenSessionKeys = shared(SharedKeys.hiddenSessionKeys).value,
+                    sessionGroups = shared(DrawerSharedKeys.sessionGroups).value,
                     isSidebarShown = shared(SharedKeys.sidebarShown).value,
                     showsWhatsNewButton = WhatsNewFeature.State().showsButton,
                     initializedInboxServerIDs = shared(SharedKeys.initializedInboxServerIDs).value,
@@ -698,6 +706,16 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         /** The drawer visually reached the other edge: its haptic. */
         data class SessionDrawerArrived(val isOpen: Boolean) : Action
         data object NewSessionTapped : Action
+        /** A group header's +: a draft whose first send puts its session in [groupID]. */
+        data class NewSessionInGroupTapped(val groupID: String) : Action
+        /** Makes a group and puts [sessionIDs] in it. */
+        data class CreateGroup(val name: String, val sessionIDs: List<String> = emptyList()) : Action
+        data class RenameGroup(val groupID: String, val name: String) : Action
+        data class ToggleGroupCollapsed(val groupID: String) : Action
+        /** Removes the group only; its sessions stay where they are on the server and in the list. */
+        data class RemoveGroup(val groupID: String) : Action
+        /** Puts [sessionIDs] in [groupID], or out of every group when it's null. Phone-local: nothing is sent. */
+        data class MoveSessionsToGroup(val sessionIDs: List<String>, val groupID: String?) : Action
         /** A computer paired for the first time: open the drawer on its sessions. */
         data object PairedComputerOpened : Action
         /** The install's first computer paired: a ready session in its latest project, with starter prompts. */

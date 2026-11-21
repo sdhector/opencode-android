@@ -19,6 +19,7 @@ import ai.opencode.feature.drawer.motion.DrawerTimeReveal
 import ai.opencode.feature.drawer.motion.DrawerTimestamp
 import ai.opencode.feature.drawer.motion.drawerPanList
 import ai.opencode.feature.drawer.drawerSessions
+import ai.opencode.feature.drawer.groupID
 import ai.opencode.feature.drawer.style.DrawerEmptyPinDropZone
 import ai.opencode.feature.drawer.style.DrawerHeaderScrollState
 import ai.opencode.feature.drawer.style.DrawerSectionHeaderKind
@@ -88,6 +89,9 @@ class DrawerListActions(
     val openWhatsNew: () -> Unit,
     val hideWhatsNew: () -> Unit,
     val openArchived: () -> Unit,
+    /** A group header's +: closes the drawer on a new session in the group. */
+    val newSessionInGroup: (groupID: String) -> Unit,
+    val editGroups: (DrawerGroupEditor.Request) -> Unit,
 )
 
 @Stable
@@ -312,7 +316,7 @@ fun DrawerListView(
         val state = store.state
         val sessions = state.drawerSessions
         val unpinnedOrder = state.visibleSessions
-            .filter { it.id == id || !state.isPinned(it.id) }
+            .filter { it.id == id || (!state.isPinned(it.id) && state.groupID(it.id) == null) }
             .sortedByDescending { it.updatedAt }
             .map { it.id }
         pinDrag.beginDrag(
@@ -442,6 +446,19 @@ fun DrawerListView(
                         returnFocus = returnFocus.takeIf { item == DrawerListItem.CatchUp },
                     )
                     DrawerListItem.Archived -> ArchivedEntryRow(current.archivedCount, regularList = true, onClick = { currentActions.openArchived() })
+                    is DrawerListItem.GroupHeader -> {
+                        val header = current.groupHeaders[item.groupID] ?: return@itemsIndexed
+                        val groupActions = remember(header.id, header.name) {
+                            DrawerGroupHeaderActions(
+                                toggle = { store.send(HomeFeature.Action.ToggleGroupCollapsed(header.id)) },
+                                newSession = { currentActions.newSessionInGroup(header.id) },
+                                rename = { currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
+                                remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
+                            )
+                        }
+                        DrawerListGroupHeaderCell(header, groupActions)
+                    }
+                    DrawerListItem.NewGroup -> DrawerListNewGroupRow(onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) })
                     is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag)
                     DrawerListItem.Empty -> DrawerListEmptyRow(current.search)
                     DrawerListItem.Footer -> DrawerListFooterRow(
@@ -454,7 +471,7 @@ fun DrawerListView(
                     }
                     is DrawerListItem.Session -> {
                         val row = current.rows[item.id] ?: return@itemsIndexed
-                        val rowActions = remember(row.session.id, row.unread, row.isPinnedSection) {
+                        val rowActions = remember(row.session.id, row.unread, row.isPinnedSection, row.groupID) {
                             rowActions(row, store, pinDrag, liftedID, listState, { currentActions }, ::beginPinDrag)
                         }
                         DrawerListSessionCell(
@@ -526,6 +543,8 @@ private fun rowActions(
         delete = { store.send(HomeFeature.Action.DeleteSessionTapped(id)) },
         movePinUp = { store.send(HomeFeature.Action.MovePinUp(id)) },
         movePinDown = { store.send(HomeFeature.Action.MovePinDown(id)) },
+        moveToGroup = { actions().editGroups(DrawerGroupEditor.Request.Move(listOf(id))) },
+        removeFromGroup = { store.send(HomeFeature.Action.MoveSessionsToGroup(listOf(id), null)) },
     )
 }
 
@@ -572,6 +591,8 @@ private fun stabilized(previous: DrawerListModel, next: DrawerListModel): Drawer
 private fun contentType(item: DrawerListItem): Int = when (item) {
     DrawerListItem.CatchUp, DrawerListItem.WhatsNew, DrawerListItem.Archived -> 0
     is DrawerListItem.Header -> 2
+    is DrawerListItem.GroupHeader -> 8
+    DrawerListItem.NewGroup -> 9
     is DrawerListItem.Session -> 3
     DrawerListItem.Empty -> 4
     is DrawerListItem.Ghost -> 5

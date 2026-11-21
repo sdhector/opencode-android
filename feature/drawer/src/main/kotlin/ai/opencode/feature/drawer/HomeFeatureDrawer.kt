@@ -260,6 +260,8 @@ internal fun HomeFeature.reduceDrawer(state: State, action: Action): HomeReduced
                 val persistence = dependency(ComposerPersistence)
                 persistence.settlePrompts(unsent.messageIDs)
                 var s = state.copy(pendingDeletion = null, unsentDrafts = persistence.unsentDrafts(state.server.persistenceID))
+                    .updatingSessionGroups { it.forgetting(state.server.persistenceID, unsent.sessionID) }
+                if (s.draftGroup?.draftID == unsent.draftID) s = s.copy(draftGroup = null)
                 val open = s.sessionDetail
                 if (open != null && open.session == null && open.outboxDraftID == unsent.draftID) s = s.openingDraft(reason = "you deleted it")
                 return Reduced(s)

@@ -2,6 +2,7 @@ package ai.opencode.feature.drawer
 
 import ai.opencode.core.store.StoreOf
 import ai.opencode.feature.settings.whatsnew.WhatsNewFeature
+import ai.opencode.feature.drawer.list.DrawerGroupEditor
 import ai.opencode.feature.drawer.list.DrawerSelection
 import ai.opencode.feature.drawer.motion.DrawerKeyboardHold
 import ai.opencode.feature.drawer.motion.DrawerKeyboardMonitor
@@ -51,6 +52,9 @@ class HomeViewState internal constructor(
 
     /** The rows chosen by holding one. */
     val selection = DrawerSelection()
+
+    /** The local-group dialog the drawer is asking about. */
+    val groupEditor = DrawerGroupEditor()
 
     /** The drawer shows its Archived page over the list. */
     var showsArchived: Boolean by mutableStateOf(false)
@@ -138,6 +142,13 @@ class HomeViewState internal constructor(
         keyboardHold?.cardWillChange()
         closeSessionDrawer()
         store.send(HomeFeature.Action.NewSessionTapped)
+    }
+
+    /** A group header's + in the drawer. */
+    fun startNewSessionInGroup(groupID: String) {
+        keyboardHold?.cardWillChange()
+        closeSessionDrawer()
+        store.send(HomeFeature.Action.NewSessionInGroupTapped(groupID))
     }
 
     /** The drawer's Catch Up row. */

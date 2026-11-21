@@ -13,6 +13,7 @@ import ai.opencode.feature.session.SessionFeature
 import ai.opencode.feature.session.pruneRequests
 import ai.opencode.feature.transcript.list.NewMessagesMark
 import ai.opencode.feature.drawer.catchup.CatchUpFeature
+import ai.opencode.feature.drawer.groups.SessionGroup
 import ai.opencode.server.ServerSharedKeys
 import ai.opencode.server.model.OpenCodeSession
 import ai.opencode.server.model.SessionTitle
@@ -204,12 +205,23 @@ val HomeFeature.State.pinnedSessions: List<OpenCodeSession> get() = drawerSessio
 
 val HomeFeature.State.recentSessions: List<OpenCodeSession> get() = drawerSessions.recents
 
-/** The drawer's two lists. */
-data class DrawerSessions(val pinned: List<OpenCodeSession>, val recents: List<OpenCodeSession>)
+/** A local group and the visible sessions in it, newest first. */
+data class DrawerGroupSessions(val group: SessionGroup, val sessions: List<OpenCodeSession>)
 
 /**
- * Pinned (in pin order) and Recents (newest first), from one pass over `visibleSessions`: the
- * drawer's list builds both on every change.
+ * The drawer's lists. [recents] holds only the sessions in no group; every group of this server is
+ * in [groups], in the order they were made, empty or not.
+ */
+data class DrawerSessions(
+    val pinned: List<OpenCodeSession>,
+    val recents: List<OpenCodeSession>,
+    val groups: List<DrawerGroupSessions> = emptyList(),
+)
+
+/**
+ * Pinned (in pin order), each group's sessions and Recents (newest first), from one pass over
+ * `visibleSessions`: the drawer's list builds them on every change. A pinned session stays in
+ * Pinned, so no row shows twice.
  */
 val HomeFeature.State.drawerSessions: DrawerSessions
     get() {
@@ -222,13 +234,19 @@ val HomeFeature.State.drawerSessions: DrawerSessions
         for (key in pinnedSessionKeys) {
             if (key.startsWith(prefix)) pinnedIDs += key.removePrefix(prefix)
         }
-        if (pinnedIDs.isEmpty()) return DrawerSessions(emptyList(), visible.sortedByDescending { it.updatedAt })
+        val serverGroups = sessionGroups.groups(server.persistenceID)
+        if (pinnedIDs.isEmpty() && serverGroups.isEmpty()) return DrawerSessions(emptyList(), visible.sortedByDescending { it.updatedAt })
         val pinnedSet = pinnedIDs.toHashSet()
+        val membership = sessionGroups.membership(server.persistenceID)
         val byID = HashMap<String, OpenCodeSession>()
+        val grouped = HashMap<String, MutableList<OpenCodeSession>>()
         val recents = mutableListOf<OpenCodeSession>()
         for (session in visible) {
+            val groupID = membership[session.id]
             if (session.id in pinnedSet) {
                 if (session.id !in byID) byID[session.id] = session
+            } else if (groupID != null) {
+                grouped.getOrPut(groupID) { mutableListOf() } += session
             } else {
                 recents += session
             }
@@ -238,7 +256,11 @@ val HomeFeature.State.drawerSessions: DrawerSessions
             val session = byID[id] ?: continue
             pinned += session
         }
-        return DrawerSessions(pinned, recents.sortedByDescending { it.updatedAt })
+        return DrawerSessions(
+            pinned,
+            recents.sortedByDescending { it.updatedAt },
+            serverGroups.map { group -> DrawerGroupSessions(group, grouped[group.id].orEmpty().sortedByDescending { it.updatedAt }) },
+        )
     }
 
 /** Waiting sessions first, then newest. */
@@ -628,6 +650,7 @@ fun HomeFeature.State.purgingSession(sessionID: String): HomeFeature.State {
         .updatingManuallyUnreadSessionKeys { it - key }
         .updatingMutedSessionKeys { it - key }
         .updatingHiddenSessionKeys { it - key }
+        .updatingSessionGroups { it.forgetting(serverID, sessionID) }
     if (s.lastViewedSessionIDs[serverID] == sessionID) s = s.updatingLastViewedSessionIDs { it - serverID }
     return s
 }

@@ -20,7 +20,7 @@ import ai.opencode.server.OpenCodeServerEvent
 
 internal fun HomeFeature.core(state: State, action: Action): Reduced<State, Action> {
     val reduced = coreRoute(state, action)
-    var s = reduced.state.absorbingSharedDrafts()
+    var s = reduced.state.absorbingSharedDrafts().resolvingDraftGroup()
     val persists = when (action) {
         is Action.SnapshotRefreshed, is Action.DeleteSessionConfirmed, is Action.DeleteSessionResponse,
         Action.TranscriptCacheFlushRequested -> true
@@ -184,6 +184,14 @@ private fun HomeFeature.coreRoute(state: State, action: Action): Reduced<State, 
     Action.DrawerOpenRequestHandled,
     Action.DrawerCallTapped,
     -> reduceDrawer(state.adoptingSearchResultFor(action), action)
+
+    is Action.NewSessionInGroupTapped,
+    is Action.CreateGroup,
+    is Action.RenameGroup,
+    is Action.ToggleGroupCollapsed,
+    is Action.RemoveGroup,
+    is Action.MoveSessionsToGroup,
+    -> reduceGroups(state, action)
 
     is Action.InAppNoticeExpired ->
         if (state.inAppNotice?.id != action.id) Reduced(state) else Reduced(state.copy(inAppNotice = null))

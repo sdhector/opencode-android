@@ -43,6 +43,23 @@
     <string name="drawer_move_up">Move Up</string>
     <string name="drawer_move_down">Move Down</string>
 
+    <!-- Local session groups -->
+    <string name="drawer_group_new">New Group</string>
+    <string name="drawer_group_name_placeholder">Group Name</string>
+    <string name="drawer_group_rename">Rename Group</string>
+    <string name="drawer_group_remove">Remove Group</string>
+    <string name="drawer_group_remove_title">Remove “%1$s”?</string>
+    <string name="drawer_group_remove_message">Its sessions stay as they are and return to Recents. Nothing changes on the server.</string>
+    <string name="drawer_group_move">Move to Group</string>
+    <string name="drawer_group_remove_from">Remove from Group</string>
+    <string name="drawer_group_new_session">New Session in “%1$s”</string>
+    <string name="drawer_group_expanded_state">Expanded</string>
+    <string name="drawer_group_collapsed_state">Collapsed</string>
+    <plurals name="drawer_group_session_count">
+        <item quantity="one">%1$d session</item>
+        <item quantity="other">%1$d sessions</item>
+    </plurals>
+
     <!-- Section headers, shortcut rows and list footer -->
     <string name="drawer_section_pinned">Pinned</string>
     <string name="drawer_section_recents">Recents</string>

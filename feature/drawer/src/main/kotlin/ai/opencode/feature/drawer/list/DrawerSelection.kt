@@ -23,6 +23,7 @@ import ai.opencode.feature.drawer.inboxSidebarArchivedRows
 import ai.opencode.feature.drawer.isHidden
 import ai.opencode.feature.drawer.isMuted
 import ai.opencode.feature.drawer.isPinned
+import ai.opencode.feature.drawer.groupID
 import ai.opencode.feature.drawer.isUnread
 import ai.opencode.feature.drawer.visibleSessions
 import ai.opencode.feature.system.SessionWindowTarget
@@ -193,6 +194,7 @@ internal fun selectionActions(
     store: StoreOf<HomeFeature.State, HomeFeature.Action>,
     selection: DrawerSelection,
     pins: Boolean,
+    groupEditor: DrawerGroupEditor? = null,
 ): Pair<List<DrawerRowMenuItem>, List<DrawerRowMenuItem>> {
     val state = store.state
     val ids = selection.ids.toList()
@@ -266,6 +268,22 @@ internal fun selectionActions(
             selection.clear()
         },
     )
+    if (groupEditor != null) {
+        overflow.add(
+            DrawerRowMenuItem(localized(R.string.drawer_group_move), SFSymbol.Folder) {
+                groupEditor.request = DrawerGroupEditor.Request.Move(ids)
+                selection.clear()
+            },
+        )
+        if (ids.any { state.groupID(it) != null }) {
+            overflow.add(
+                DrawerRowMenuItem(localized(R.string.drawer_group_remove_from), SFSymbol.QuestionmarkFolder) {
+                    store.send(HomeFeature.Action.MoveSessionsToGroup(ids, null))
+                    selection.clear()
+                },
+            )
+        }
+    }
     val windows = dependency(WindowsClient)
     if (ids.size == 1 && windows.isAvailable()) {
         overflow.add(
