@@ -13,6 +13,7 @@ import ai.opencode.core.store.Reduced
 import ai.opencode.core.store.Reducer
 import ai.opencode.feature.drawer.catchup.CatchUpFeature
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
+import ai.opencode.feature.drawer.groups.DrawerPath
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
 import ai.opencode.feature.drawer.groups.GroupSync
 import ai.opencode.feature.drawer.groups.SessionGroup
@@ -158,6 +159,8 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         val sessionGroups: SessionGroups = SessionGroups(),
         /** The group the open draft's first send puts its session in (Local Session Groups). */
         val draftGroup: DraftGroupTarget? = null,
+        /** The drawer's place among this server's groups: the root, or inside one. Kept while the drawer closes. */
+        val drawerPath: DrawerPath = DrawerPath(),
         /** Mirror of `DrawerSharedKeys.sharedSessionGroups`. */
         val sharedSessionGroups: SharedSessionGroups = SharedSessionGroups(),
         /** This server's shared groups this run: discovery, queued writes, the sharing dialog. */
@@ -385,8 +388,8 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
 
         fun withServer(server: OpenCodeServer): State {
             val moved = copy(connection = connection.copy(server = server))
-            // Shared groups' discovery and queue belong to one server.
-            return if (server.persistenceID == this.server.persistenceID) moved else moved.copy(groupSync = GroupSync())
+            // Shared groups' discovery and queue, and the drawer's place among the groups, belong to one server.
+            return if (server.persistenceID == this.server.persistenceID) moved else moved.copy(groupSync = GroupSync(), drawerPath = DrawerPath())
         }
 
         /**
@@ -721,12 +724,17 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         /** The drawer visually reached the other edge: its haptic. */
         data class SessionDrawerArrived(val isOpen: Boolean) : Action
         data object NewSessionTapped : Action
-        /** A group header's +: a draft whose first send puts its session in [groupID]. */
+        /** A draft whose first send puts its session in [groupID]. */
         data class NewSessionInGroupTapped(val groupID: String) : Action
+        /** The drawer's New Session: in the group the drawer shows ([shownDrawerGroup]), or a plain one at the root. */
+        data object DrawerNewSessionTapped : Action
+        /** A group's row in the drawer: the list shows only its sessions. */
+        data class DrawerGroupOpened(val groupID: String) : Action
+        /** Back from a group (system back, its title's back button): the list goes up one level. */
+        data object DrawerGroupBackTapped : Action
         /** Makes a group and puts [sessionIDs] in it. */
         data class CreateGroup(val name: String, val sessionIDs: List<String> = emptyList()) : Action
         data class RenameGroup(val groupID: String, val name: String) : Action
-        data class ToggleGroupCollapsed(val groupID: String) : Action
         /** Removes the group only; its sessions stay where they are on the server and in the list. */
         data class RemoveGroup(val groupID: String) : Action
         /** Puts [sessionIDs] in [groupID], or out of every group when it's null. Only a shared server hears of it. */

@@ -90,8 +90,10 @@ class DrawerListActions(
     val openWhatsNew: () -> Unit,
     val hideWhatsNew: () -> Unit,
     val openArchived: () -> Unit,
-    /** A group header's +: closes the drawer on a new session in the group. */
-    val newSessionInGroup: (groupID: String) -> Unit,
+    /** A group's row: the list goes inside it. */
+    val openGroup: (groupID: String) -> Unit,
+    /** The group title's back button: the list goes up a level. */
+    val groupBack: () -> Unit,
     val editGroups: (DrawerGroupEditor.Request) -> Unit,
 )
 
@@ -429,6 +431,7 @@ fun DrawerListView(
         search = model.search,
         pinned = model.sections[DrawerListSection.pinned].orEmpty(),
         groups = model.groupHeaders.keys.toList(),
+        level = model.tray?.id,
     )
     shownPins[0]?.let { previous ->
         if (previous.movesPins(pins) && isDrawerVisible) pinDrag.pinMove.begin(model.reducedMotion)
@@ -493,9 +496,8 @@ fun DrawerListView(
                         val header = current.groupHeaders[item.groupID] ?: return@itemsIndexed
                         val groupActions = remember(header.id, header.name) {
                             DrawerGroupHeaderActions(
-                                toggle = { store.send(HomeFeature.Action.ToggleGroupCollapsed(header.id)) },
-                                newSession = { currentActions.newSessionInGroup(header.id) },
-                                rename = { currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
+                                open = { currentActions.openGroup(header.id) },
+                                rename ={ currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
                                 remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
                                 moveUp = { store.send(HomeFeature.Action.MoveGroupUp(header.id)) },
                                 moveDown = { store.send(HomeFeature.Action.MoveGroupDown(header.id)) },
@@ -507,6 +509,17 @@ fun DrawerListView(
                             )
                         }
                         DrawerListGroupHeaderCell(header, groupActions, pinDrag, listCoordinates = { listCoordinates[0] })
+                    }
+                    is DrawerListItem.GroupTitle -> {
+                        val header = current.tray ?: return@itemsIndexed
+                        val titleActions = remember(header.id, header.name) {
+                            DrawerGroupHeaderActions(
+                                open = {},
+                                rename = { currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
+                                remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
+                            )
+                        }
+                        DrawerListGroupTitleRow(header, onBack = { currentActions.groupBack() }, actions = titleActions)
                     }
                     DrawerListItem.NewGroup -> DrawerListNewGroupRow(
                         pinDrag,
@@ -656,6 +669,7 @@ private fun contentType(item: DrawerListItem): Int = when (item) {
     DrawerListItem.CatchUp, DrawerListItem.WhatsNew, DrawerListItem.Archived -> 0
     is DrawerListItem.Header -> 2
     is DrawerListItem.GroupHeader -> 8
+    is DrawerListItem.GroupTitle -> 11
     DrawerListItem.NewGroup -> 9
     DrawerListItem.RecentsDrop -> 10
     is DrawerListItem.Session -> 3
@@ -665,14 +679,18 @@ private fun contentType(item: DrawerListItem): Int = when (item) {
     DrawerListItem.Footer -> 7
 }
 
-/** What the list showed of its pins and its groups' order, to tell a Pin, Unpin or Move outside a drag. */
+/**
+ * What the list showed of its pins and its groups' order, to tell a Pin, Unpin or Move outside a
+ * drag. [level] is the group the list is inside: going in or out of one moves nothing.
+ */
 internal data class DrawerShownPins(
     val serverID: String,
     val search: String,
     val pinned: List<DrawerListItem>,
     val groups: List<String> = emptyList(),
+    val level: String? = null,
 ) {
-    fun movesPins(next: DrawerShownPins): Boolean = serverID == next.serverID && search == next.search &&
+    fun movesPins(next: DrawerShownPins): Boolean = serverID == next.serverID && search == next.search && level == next.level &&
         (pinned != next.pinned || groups != next.groups && groups.toSet() == next.groups.toSet())
 }
 
@@ -685,7 +703,8 @@ private fun pinDragKey(key: Any): DrawerPinDrag.ItemKey? {
         text == DrawerListItem.Header(DrawerSectionHeaderKind.Recents).key -> DrawerPinDrag.ItemKey.RecentsHeader
         text == DrawerListItem.NewGroup.key -> DrawerPinDrag.ItemKey.NewGroup
         text == DrawerListItem.RecentsDrop.key -> DrawerPinDrag.ItemKey.RecentsDrop
-        text.startsWith("group-") -> DrawerPinDrag.ItemKey.GroupHeader(text.removePrefix("group-"))
+        text.startsWith("group-title-") -> null
+        text.startsWith("group-") ->DrawerPinDrag.ItemKey.GroupHeader(text.removePrefix("group-"))
         else -> null
     }
 }

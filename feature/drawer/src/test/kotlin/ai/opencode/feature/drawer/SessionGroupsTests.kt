@@ -23,6 +23,7 @@ import ai.opencode.feature.drawer.HomeFeatureTestSupport.snapshot
 import ai.opencode.core.dependencies.TestClock
 import ai.opencode.core.store.TestStore
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
+import ai.opencode.feature.drawer.groups.DrawerPath
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
 import ai.opencode.feature.drawer.groups.GroupEdit
 import ai.opencode.feature.drawer.groups.GroupSharingPrompt
@@ -41,8 +42,10 @@ import ai.opencode.server.model.OpenCodeSessionGroupsWrite
 import kotlinx.coroutines.test.runTest
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import ai.opencode.feature.drawer.list.DrawerListGroupHeader
 import ai.opencode.feature.drawer.list.DrawerListInputs
 import ai.opencode.feature.drawer.list.DrawerListItem
+import ai.opencode.feature.drawer.list.DrawerShownPins
 import ai.opencode.feature.drawer.list.DrawerListModel
 import ai.opencode.feature.drawer.list.DrawerListSection
 import ai.opencode.feature.drawer.style.DrawerSectionHeaderKind
@@ -156,12 +159,7 @@ class SessionGroupsTests {
 
     @Test
     fun movingAGroupPutsItInItsNewPlaceAndKeepsTheRestInOrder() {
-        val store = SessionGroups()
-            .creating(serverID, "one", "One")
-            .creating(serverID, "two", "Two")
-            .creating(serverID, "three", "Three")
-            .assigning(serverID, listOf("s1"), "two")
-            .settingCollapsed(serverID, "two", true)
+        val store = SessionGroups(mapOf(serverID to listOf(group("one"), group("two", "s1", collapsed = true), group("three"))))
         fun SessionGroups.ids() = groups(serverID).map { it.id }
         val twoFirst = store.moving(serverID, "two", 0)
         assertEquals(listOf("two", "one", "three"), twoFirst.ids())
@@ -179,7 +177,7 @@ class SessionGroupsTests {
     // region Projection
 
     @Test
-    fun groupedSessionsLeaveRecentsAndShowUnderTheirGroupNewestFirst() = homeTest { h ->
+    fun groupedSessionsLeaveRecentsAndShowInsideTheirGroupNewestFirst() = homeTest { h ->
         val sessions = listOf(session("a", 40), session("b", 30), session("c", 20), session("d", 10))
         val state = h.state { HomeFeature.State(server, snapshot(sessions)) }
             .copy(sessionGroups = groups(group("g", "c", "b"), group("empty")))
@@ -190,14 +188,21 @@ class SessionGroupsTests {
         assertTrue(drawer.groups[1].sessions.isEmpty())
 
         val model = state.model()
-        assertEquals(listOf("b", "c"), model.sections[DrawerListSection.groups]!!.filterIsInstance<DrawerListItem.Session>().map { it.id })
+        assertEquals(
+            "the root shows each group as one row",
+            listOf(DrawerListItem.GroupHeader("g"), DrawerListItem.GroupHeader("empty"), DrawerListItem.NewGroup),
+            model.sections[DrawerListSection.groups],
+        )
         assertEquals(listOf("a", "d"), model.sections[DrawerListSection.recents]!!.filterIsInstance<DrawerListItem.Session>().map { it.id })
         assertEquals(listOf("g", "empty"), model.groupHeaders.keys.toList())
         assertEquals(2, model.groupHeaders["g"]?.count)
-        assertEquals("g", model.rows["b"]?.groupID)
-        assertTrue(model.rows["b"]?.inGroup == true)
+        assertNull(model.rows["b"])
         assertNull(model.rows["a"]?.groupID)
-        assertTrue("the list ends the group section with New Group", model.sections[DrawerListSection.groups]!!.last() == DrawerListItem.NewGroup)
+
+        val inside = state.copy(drawerPath = DrawerPath(listOf("g"))).model()
+        assertEquals(listOf("b", "c"), inside.sessionIDs())
+        assertEquals("g", inside.rows["b"]?.groupID)
+        assertTrue(inside.rows["b"]?.inGroup == true)
     }
 
     @Test
@@ -213,7 +218,8 @@ class SessionGroupsTests {
         assertEquals(listOf("c"), drawer.groups[0].sessions.map { it.id })
         val ids = state.model().sessionIDs()
         assertEquals("no row shows twice", ids.distinct(), ids)
-        assertEquals(setOf("a", "b", "c"), ids.toSet())
+        assertEquals(setOf("a", "b"), ids.toSet())
+        assertEquals("inside the group only the unpinned member shows", listOf("c"), state.copy(drawerPath = DrawerPath(listOf("g"))).model().sessionIDs())
         assertEquals("the pinned row still knows its group, for Remove from Group", "g", state.model().rows["b"]?.groupID)
         assertFalse(state.model().rows["b"]?.inGroup == true)
     }
@@ -230,7 +236,7 @@ class SessionGroupsTests {
         assertEquals(
             listOf(
                 DrawerListItem.Header(DrawerSectionHeaderKind.Pinned), DrawerListItem.Session("b"),
-                DrawerListItem.GroupHeader("g"), DrawerListItem.Session("c"), DrawerListItem.NewGroup,
+                DrawerListItem.GroupHeader("g"), DrawerListItem.NewGroup,
                 DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("a"),
             ),
             pinned.copy(sessionGroups = groups(group("g", "c"))).model().shown(),
@@ -246,32 +252,30 @@ class SessionGroupsTests {
         assertEquals(
             "with nothing pinned the groups lead",
             listOf(
-                DrawerListItem.GroupHeader("g"), DrawerListItem.Session("c"), DrawerListItem.NewGroup,
+                DrawerListItem.GroupHeader("g"), DrawerListItem.NewGroup,
                 DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("a"), DrawerListItem.Session("b"),
             ),
             base.copy(sessionGroups = groups(group("g", "c"))).model().shown(),
         )
-        assertEquals("the pin drag is told which sessions each group shows", listOf("c"), pinned.copy(sessionGroups = groups(group("g", "c"))).model().groupHeaders["g"]?.sessionIDs)
+        assertEquals("the pin drag is told no group shows rows at the root", emptyList<String>(), pinned.copy(sessionGroups = groups(group("g", "c"))).model().groupHeaders["g"]?.sessionIDs)
     }
 
     @Test
-    fun aCollapsedGroupHidesItsRowsUntilSearchFindsThem() = homeTest { h ->
+    fun aGroupSavedCollapsedShowsAsAnyOtherAndSearchListsItsMatchesUnderIt() = homeTest { h ->
         val sessions = listOf(session("a", 40), session("b", 30))
         val state = h.state { HomeFeature.State(server, snapshot(sessions)) }
             .copy(sessionGroups = groups(group("g", "b", collapsed = true)))
-        val collapsed = state.model()
-        assertTrue(collapsed.groupHeaders["g"]!!.isCollapsed)
-        assertEquals("the count stays while it's closed", 1, collapsed.groupHeaders["g"]!!.count)
-        assertFalse("b" in collapsed.sessionIDs())
-        assertNull(collapsed.rows["b"])
+        val root = state.model()
+        assertEquals("the count shows on its row", 1, root.groupHeaders["g"]!!.count)
+        assertNull(root.rows["b"])
+        assertEquals("it opens like any group", listOf("b"), state.copy(drawerPath = DrawerPath(listOf("g"))).model().sessionIDs())
 
         val searching = state.copy(search = "Title b").model()
-        assertFalse("searching opens it", searching.groupHeaders["g"]!!.isCollapsed)
-        assertTrue("b" in searching.sessionIDs())
+        assertEquals("search lists the group's matches under its row", listOf(DrawerListItem.GroupHeader("g"), DrawerListItem.Session("b")), searching.sections[DrawerListSection.groups])
         assertEquals("only matches show", listOf("b"), searching.sessionIDs())
         assertFalse("the empty group isn't offered while searching", state.copy(search = "Title a").model().groupHeaders.containsKey("g"))
         assertFalse("nor New Group", DrawerListItem.NewGroup in searching.items)
-        assertTrue("the setting itself is untouched", state.copy(search = "Title b").sessionGroups.group(serverID, "g")!!.isCollapsed)
+        assertTrue("the saved flag is untouched", state.copy(search = "Title b").sessionGroups.group(serverID, "g")!!.isCollapsed)
     }
 
     @Test
@@ -332,8 +336,6 @@ class SessionGroupsTests {
         store.send(Action.MoveSessionsToGroup(listOf("a"), null))
         assertNull(store.state.groupID("a"))
         assertEquals(id, store.state.groupID("b"))
-        store.send(Action.ToggleGroupCollapsed(id))
-        assertTrue(store.state.serverGroups.single().isCollapsed)
         store.send(Action.RenameGroup(id, "Home"))
         assertEquals("Home", store.state.serverGroups.single().name)
         store.send(Action.RemoveGroup(id))
@@ -348,7 +350,7 @@ class SessionGroupsTests {
         val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }) { this[UuidClient] = UuidClient.incrementing() }
         store.send(Action.CreateGroup("   "))
         store.send(Action.MoveSessionsToGroup(listOf("a"), "nope"))
-        store.send(Action.ToggleGroupCollapsed("nope"))
+        store.send(Action.DrawerGroupOpened("nope"))
         store.send(Action.RemoveGroup("nope"))
         assertTrue(store.state.serverGroups.isEmpty())
     }
@@ -440,26 +442,23 @@ class SessionGroupsTests {
         val state = h.state { HomeFeature.State(server, snapshot(sessions)) }
             .copy(sessionGroups = groups(group("one", "a", "b"), group("two", "c")))
 
-        val folded = state.model(foldedGroupID = "one")
+        val searching = state.copy(search = "Title")
+        val folded = searching.model(foldedGroupID = "one")
         assertEquals(
-            listOf(DrawerListItem.GroupHeader("one"), DrawerListItem.GroupHeader("two"), DrawerListItem.Session("c"), DrawerListItem.NewGroup),
+            listOf(DrawerListItem.GroupHeader("one"), DrawerListItem.GroupHeader("two"), DrawerListItem.Session("c")),
             folded.sections[DrawerListSection.groups],
         )
-        assertEquals("the lifted header keeps its count", 2, folded.groupHeaders["one"]!!.count)
-        assertFalse("it isn't closed", folded.groupHeaders["one"]!!.isCollapsed)
+        assertEquals("the lifted row keeps its count", 2, folded.groupHeaders["one"]!!.count)
         assertFalse("its rows don't fall into Recents", "a" in folded.sessionIDs())
 
         val rest = state.model()
         assertEquals(false to true, rest.groupHeaders["one"]!!.let { it.canMoveUp to it.canMoveDown })
         assertEquals(true to false, rest.groupHeaders["two"]!!.let { it.canMoveUp to it.canMoveDown })
-        assertFalse(state.copy(search = "Title").model().groupHeaders.values.any { it.canMoveUp || it.canMoveDown })
+        assertFalse(searching.model().groupHeaders.values.any { it.canMoveUp || it.canMoveDown })
 
         assertEquals(
-            "the list follows the saved order, rows and all",
-            listOf(
-                DrawerListItem.GroupHeader("two"), DrawerListItem.Session("c"),
-                DrawerListItem.GroupHeader("one"), DrawerListItem.Session("a"), DrawerListItem.Session("b"), DrawerListItem.NewGroup,
-            ),
+            "the list follows the saved order",
+            listOf(DrawerListItem.GroupHeader("two"), DrawerListItem.GroupHeader("one"), DrawerListItem.NewGroup),
             state.copy(sessionGroups = state.sessionGroups.moving(serverID, "two", 0)).model().sections[DrawerListSection.groups],
         )
     }
@@ -531,7 +530,7 @@ class SessionGroupsTests {
             "Pinned stays above the groups and Recents below them",
             listOf(
                 DrawerListItem.Header(DrawerSectionHeaderKind.Pinned), DrawerListItem.Session("c"),
-                DrawerListItem.GroupHeader("two"), DrawerListItem.Session("b"), DrawerListItem.GroupHeader("one"), DrawerListItem.NewGroup,
+                DrawerListItem.GroupHeader("two"), DrawerListItem.GroupHeader("one"), DrawerListItem.NewGroup,
                 DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("d"),
             ),
             relaunched.model().items.filter {
@@ -706,11 +705,12 @@ class SessionGroupsTests {
         assertEquals("g", switched.groupID("ses_queued"))
 
         val listed = switched.copy(unsentDrafts = h.composerPersistence.unsentDrafts(serverID))
-        val model = listed.model()
-        assertEquals("the unsent row shows under its group", listOf("ses_queued"), model.sections[DrawerListSection.groups]!!.filterIsInstance<DrawerListItem.Session>().map { it.id })
+        assertEquals("the group counts it", 1, listed.model().groupHeaders["g"]?.count)
+        assertNull("not in Recents", listed.model().rows["ses_queued"])
+        val model = listed.copy(drawerPath = DrawerPath(listOf("g"))).model()
+        assertEquals("the unsent row shows in its group", listOf("ses_queued"), model.sessionIDs())
         assertTrue(model.rows["ses_queued"]?.inGroup == true)
         assertNotNull(model.rows["ses_queued"]?.unsent)
-        assertEquals("the group counts it", 1, model.groupHeaders["g"]?.count)
     }
 
     // endregion
@@ -1199,6 +1199,198 @@ class SessionGroupsTests {
         assertEquals("bounded", 3, attempts)
         assertEquals(GroupSync.Support.Unknown, failed.support)
         assertNotNull(failed.error)
+    }
+
+    // endregion
+
+    // region Navigation
+
+    @Test
+    fun aPathOpensGoesBackOneLevelAndEndsAtAGoneGroup() {
+        val root = DrawerPath()
+        assertTrue(root.isRoot)
+        assertEquals(root, root.back())
+        val inside = root.opening("g")
+        assertEquals("g", inside.groupID)
+        assertEquals("opening the open group again changes nothing", inside, inside.opening("g"))
+        val deeper = inside.opening("h")
+        assertEquals(listOf("g", "h"), deeper.groupIDs)
+        assertEquals(inside, deeper.back())
+        assertEquals(root, deeper.back().back())
+        assertEquals("a gone level ends the path there", inside, deeper.resolved { it == "g" })
+        assertEquals(root, deeper.resolved { it == "h" })
+        assertEquals(DrawerPath(listOf("srv", "h")), deeper.renamingGroup("g", "srv"))
+        assertEquals(deeper, deeper.renamingGroup("other", "srv"))
+    }
+
+    @Test
+    fun openingAGroupShowsOnlyItsSessionsAndBackReturnsToTheRoot() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30), session("c", 20), session("d", 10))
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        val saved = groups(group("g", "c", "b"), group("h", "d"))
+        h.setShared(DrawerSharedKeys.sessionGroups, saved)
+        h.setShared(SharedKeys.pinnedSessionKeys, listOf(base.sessionKey("a")))
+        val played = LockIsolated<List<Haptic>>(emptyList())
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) }) {
+            this[HapticsClient] = HapticsClient(play = { played.append(it) })
+        }
+        store.exhaustive = false
+
+        store.send(Action.DrawerGroupOpened("g"))
+        assertEquals(DrawerPath(listOf("g")), store.state.drawerPath)
+        assertEquals("g", store.state.shownDrawerGroup?.id)
+        val inside = store.state.model()
+        assertEquals(
+            "its title, then only its sessions, newest first: no shortcuts, Pinned, other groups or Recents",
+            listOf(DrawerListItem.GroupTitle("g"), DrawerListItem.Session("b"), DrawerListItem.Session("c")),
+            inside.items,
+        )
+        assertEquals(DrawerListGroupHeader("g", "Group g", count = 2), inside.tray)
+        assertTrue("nothing else to drag between", inside.groupHeaders.isEmpty())
+
+        store.send(Action.DrawerGroupBackTapped)
+        assertTrue(store.state.drawerPath.isRoot)
+        val root = store.state.model()
+        assertNull(root.tray)
+        assertEquals("Pinned keeps its row; the groups hold the rest", listOf("a"), root.sessionIDs())
+        assertEquals(listOf("g", "h"), root.groupHeaders.keys.toList())
+        assertTrue(DrawerListItem.CatchUp in root.items)
+        store.send(Action.DrawerGroupBackTapped)
+        assertTrue("back at the root stays there", store.state.drawerPath.isRoot)
+        store.send(Action.DrawerGroupOpened("missing"))
+        assertTrue("an unknown group opens nothing", store.state.drawerPath.isRoot)
+
+        assertTrue("going in and out is quiet", played.value.isEmpty())
+        assertEquals("and never writes the groups or their order", saved, h.shared(DrawerSharedKeys.sessionGroups))
+    }
+
+    @Test
+    fun searchingInsideAGroupListsEveryMatchAndClearingItReturnsToTheGroup() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30))
+        val state = h.state { HomeFeature.State(server, snapshot(sessions)) }
+            .copy(sessionGroups = groups(group("g", "b")), drawerPath = DrawerPath(listOf("g")))
+        val searching = state.copy(search = "Title")
+        assertNull(searching.shownDrawerGroup)
+        assertNull("search leaves the group's page", searching.model().tray)
+        assertEquals(setOf("a", "b"), searching.model().sessionIDs().toSet())
+        assertEquals("the place is kept for after", "g", searching.openGroup?.id)
+        assertEquals("g", searching.copy(search = "").model().tray?.id)
+    }
+
+    @Test
+    fun theDrawersNewSessionStartsInTheOpenGroupWithoutChangingTheFolder() = homeTest { h ->
+        val store = h.store(homeWithGroup(h))
+        store.exhaustive = false
+        store.send(Action.DrawerNewSessionTapped)
+        assertNull("at the root it's a plain draft", store.state.draftGroup)
+        val plain = store.state.sessionDetail!!
+        assertTrue(plain.isDraft)
+
+        store.send(Action.DrawerGroupOpened("g"))
+        store.send(Action.DrawerNewSessionTapped)
+        val draft = store.state.sessionDetail!!
+        assertTrue(draft.isDraft)
+        assertEquals(DraftGroupTarget(serverID, visit = draft.visit, groupID = "g"), store.state.draftGroup)
+        assertEquals("the same folder a plain New Session uses", plain.draftProject, draft.draftProject)
+        assertEquals("the drawer stays in the group", DrawerPath(listOf("g")), store.state.drawerPath)
+        assertEquals("and the groups are as they were", groups(group("g")), h.shared(DrawerSharedKeys.sessionGroups))
+    }
+
+    @Test
+    fun removingTheOpenGroupReturnsToTheRoot() = homeTest { h ->
+        val store = h.store(homeWithGroup(h))
+        store.exhaustive = false
+        store.send(Action.DrawerGroupOpened("g"))
+        store.send(Action.RemoveGroup("g"))
+        assertTrue(store.state.drawerPath.isRoot)
+        assertNull(store.state.model().tray)
+    }
+
+    @Test
+    fun aServerSwitchStartsTheDrawerAtTheRoot() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sessionGroups, SessionGroups(mapOf(serverID to listOf(group("g", "a")), otherServer.persistenceID to listOf(group("g", "a")))))
+        val inside = h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }.copy(drawerPath = DrawerPath(listOf("g")))
+        assertEquals("g", inside.openGroup?.id)
+        assertEquals("the same server under a new name keeps its place", inside.drawerPath, inside.withServer(server.copy(name = "Renamed")).drawerPath)
+        assertTrue("another server's Home starts at its root, even with a group of the same ID", inside.withServer(otherServer).drawerPath.isRoot)
+        val other = h.state { HomeFeature.State(otherServer, snapshot(listOf(session("a", 40)))) }
+        assertTrue(other.drawerPath.isRoot)
+        assertNull(other.model().tray)
+    }
+
+    @Test
+    fun aGroupThatGoesAwayOnASharedServerTakesTheDrawerBackToTheRoot() = homeTest { h ->
+        val sessions = listOf(session("a", 40))
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(1, SessionGroup("g", "G", sessionIDs = listOf("a"))))
+        val shared = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        val store = h.store(shared.connected()) { this[OpenCodeClient] = OpenCodeClient.testValue }
+        store.exhaustive = false
+        store.send(Action.DrawerGroupOpened("g"))
+        assertEquals("a shared group opens as a phone one does", listOf(DrawerListItem.GroupTitle("g"), DrawerListItem.Session("a")), store.state.model().items)
+
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(2))
+        val gone = h.state { store.state.copy(sharedSessionGroups = h.shared(DrawerSharedKeys.sharedSessionGroups)).resolvingDrawerPath() }
+        assertTrue(gone.drawerPath.isRoot)
+    }
+
+    @Test
+    fun aSharedGroupOpenedBeforeTheServerNamedItFollowsItsNewID() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a"))
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+        }
+        store.exhaustive = false
+        store.send(Action.CreateGroup("Work", listOf("a")))
+        val phoneID = store.state.serverGroups.single().id
+        assertTrue(store.state.groupSync.queue.isNotEmpty())
+        store.send(Action.DrawerGroupOpened(phoneID))
+        assertEquals(DrawerPath(listOf(phoneID)), store.state.drawerPath)
+        store.settled()
+        assertEquals(listOf("create", "assign"), plugin.calls.filter { it == "create" || it == "assign" })
+        assertEquals(DrawerPath(listOf("srv_1")), store.state.drawerPath)
+        assertEquals("srv_1", store.state.model().tray?.id)
+    }
+
+    @Test
+    fun aGroupReadsOlderPagesOnlyWhileItHasMembersTheyHaventReached() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30))
+        val state = h.state { HomeFeature.State(server, snapshot(sessions)) }.copy(
+            sessionGroups = groups(group("partial", "a", "older"), group("whole", "b"), group("empty")),
+            sessionPages = SessionPages(older = SessionPageCursor(next = "cursor")),
+        )
+        fun inside(id: String) = state.copy(drawerPath = DrawerPath(listOf(id))).model()
+        assertEquals(listOf(DrawerListItem.Session("a"), DrawerListItem.Footer), inside("partial").items.drop(1))
+        assertEquals(DrawerListFooter.loading, inside("partial").footer)
+        assertEquals("every member is listed: nothing to read", listOf(DrawerListItem.Session("b")), inside("whole").items.drop(1))
+        assertNull(inside("whole").footer)
+        assertEquals(listOf(DrawerListItem.Empty), inside("empty").items.drop(1))
+        assertEquals(
+            "at the end of the list the footer goes",
+            listOf(DrawerListItem.Session("a")),
+            state.copy(sessionPages = SessionPages(), drawerPath = DrawerPath(listOf("partial"))).model().items.drop(1),
+        )
+    }
+
+    @Test
+    fun rowsInsideAGroupAreChosenByAHoldButNotLiftedAndLevelsNeverMovePins() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30))
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        val state = base.copy(sessionGroups = groups(group("g", "b")), pinnedSessionKeys = listOf(base.sessionKey("a")))
+        val root = state.model()
+        assertTrue("a pinned row still lifts at the root", root.rows["a"]!!.canLift)
+        val inside = state.copy(drawerPath = DrawerPath(listOf("g"))).model()
+        assertFalse(inside.rows["b"]!!.canLift)
+        assertNull(inside.rows["b"]!!.unsent)
+
+        fun shown(model: DrawerListModel) = DrawerShownPins(
+            model.serverID, model.search, model.sections[DrawerListSection.pinned].orEmpty(), model.groupHeaders.keys.toList(), model.tray?.id,
+        )
+        assertFalse("going in plays no pin move", shown(root).movesPins(shown(inside)))
+        assertFalse("nor coming back", shown(inside).movesPins(shown(root)))
+        val unpinned = state.copy(pinnedSessionKeys = emptyList()).model()
+        assertTrue("an Unpin at the root still does", shown(root).movesPins(shown(unpinned)))
     }
 
     // endregion

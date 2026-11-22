@@ -1,6 +1,8 @@
 package ai.opencode.feature.drawer.list
 
 import ai.opencode.core.R as CoreR
+import ai.opencode.core.motion.MotionPhase
+import ai.opencode.core.motion.MotionRole
 import ai.opencode.core.store.StoreOf
 import ai.opencode.core.store.observe
 import ai.opencode.core.ui.OpenCodeAlertDialog
@@ -23,6 +25,7 @@ import ai.opencode.feature.drawer.style.DrawerMetrics
 import ai.opencode.feature.drawer.style.DrawerTunables
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,16 +35,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.animation.core.Animatable
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -51,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -64,10 +72,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
@@ -90,10 +100,9 @@ class DrawerGroupEditor {
     var request: Request? by mutableStateOf(null)
 }
 
-/** What a group header does, as closures: the row never holds a store. */
+/** What a group's row does, as closures: the row never holds a store. */
 class DrawerGroupHeaderActions(
-    val toggle: () -> Unit,
-    val newSession: () -> Unit,
+    val open: () -> Unit,
     val rename: () -> Unit,
     val remove: () -> Unit,
     val moveUp: () -> Unit = {},
@@ -110,9 +119,9 @@ class DrawerGroupHeaderActions(
 )
 
 /**
- * A group's header: its name and size, the chevron that opens or closes it, + for a new session in
- * it, and ⋮ for Move Up, Move Down, Rename and Remove. Held and dragged by its name, it reorders
- * the groups.
+ * A group's row: its name and size, and a chevron to say a tap opens it. A hold opens its menu (Move
+ * Up, Move Down, Rename, Remove), which TalkBack also offers as actions; moving the held finger
+ * lifts the row to reorder the groups.
  */
 @Composable
 fun DrawerListGroupHeaderCell(
@@ -126,30 +135,29 @@ fun DrawerListGroupHeaderCell(
     val density = LocalDensity.current
     val key = DrawerPinDrag.ItemKey.GroupHeader(header.id)
     val count = pluralStringResource(R.plurals.drawer_group_session_count, header.count, header.count)
-    val state = stringResource(if (header.isCollapsed) R.string.drawer_group_collapsed_state else R.string.drawer_group_expanded_state)
     var menuOpen by remember { mutableStateOf(false) }
-    val newSessionLabel = stringResource(R.string.drawer_group_new_session, header.name)
-    val moveUpLabel = stringResource(R.string.drawer_move_up)
-    val moveDownLabel = stringResource(R.string.drawer_move_down)
+    val menuLabel = stringResource(R.string.drawer_selection_more_options_description)
     val currentActions by rememberUpdatedState(actions)
     val hold = remember(header.id) { DrawerRowHoldState() }
-    val nameCoordinates = remember(header.id) { arrayOfNulls<LayoutCoordinates>(1) }
+    val rowCoordinates = remember(header.id) { arrayOfNulls<LayoutCoordinates>(1) }
     val groupDrag = pinDrag.groupDrag
     val lifted = groupDrag.draggingID == header.id
     val reorderable = header.canMoveUp || header.canMoveDown
+    val hasMenu = reorderable || header.canRename || header.canRemove
     val raisedSurface = if (colors.isDark) MaterialTheme.colorScheme.surfaceContainerHigh else colors.canvas
+    val customActions = groupCustomActions(header) { currentActions }
 
     DisposableEffect(header.id) {
         onDispose { currentActions.dismantled() }
     }
 
-    Row(
+    Box(
         modifier
             .fillMaxWidth()
             .graphicsLayer {
                 translationY = pinDrag.translation(key) * density.density
                 alpha = pinDrag.alpha(key)
-                // The lifted header grows as a lifted row does.
+                // The lifted row grows as a lifted session row does.
                 val grow = if (lifted) DrawerLiftedRowView.apply(groupDrag.liftProgress).scale else 1f
                 scaleX = grow
                 scaleY = grow
@@ -161,24 +169,23 @@ fun DrawerListGroupHeaderCell(
                 val surface = raisedSurface.copy(alpha = raisedSurface.alpha * groupDrag.liftProgress.coerceIn(0f, 1f))
                 drawLiftedRowSurface(surface, DrawerMetrics.rowCornerRadius.toPx(), look)
             }
-            .heightIn(min = DrawerMetrics.rowHeight)
             .testTag("drawer-group-${header.id}"),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
             Modifier
-                .weight(1f)
+                .fillMaxWidth()
                 .heightIn(min = DrawerMetrics.rowHeight)
                 .clip(RoundedCornerShape(DrawerMetrics.rowCornerRadius))
-                .onGloballyPositioned { nameCoordinates[0] = it }
+                .onGloballyPositioned { rowCoordinates[0] = it }
                 .drawerRowInteraction(
                     interaction = DrawerRowInteraction(
                         sessionID = header.id,
                         reorderable = reorderable,
-                        holdable = reorderable,
-                        select = { currentActions.toggle() },
+                        holdable = hasMenu,
+                        select = { currentActions.open() },
                         pressed = {},
-                        held = {},
+                        // The hold opens the menu; a drag growing out of it closes it again.
+                        held = { menuOpen = !menuOpen },
                         isListMoving = { currentActions.isListMoving() },
                         beginDrag = { currentActions.beginDrag(it.y) },
                         moveDrag = { point, time -> currentActions.moveDrag(point.y, time) },
@@ -186,89 +193,200 @@ fun DrawerListGroupHeaderCell(
                     ),
                     hold = hold,
                     list = listCoordinates,
-                    row = { nameCoordinates[0] },
+                    row = { rowCoordinates[0] },
                 )
-                .padding(start = DrawerMetrics.textInset)
+                .padding(start = DrawerMetrics.textInset, end = DrawerMetrics.trailingInset)
                 .clearAndSetSemantics {
                     contentDescription = "${header.name}, $count"
-                    stateDescription = state
                     role = Role.Button
-                    heading()
-                    onClick { currentActions.toggle(); true }
-                    customActions = buildList {
-                        if (header.canMoveUp) add(CustomAccessibilityAction(moveUpLabel) { currentActions.moveUp(); true })
-                        if (header.canMoveDown) add(CustomAccessibilityAction(moveDownLabel) { currentActions.moveDown(); true })
-                    }
+                    onClick { currentActions.open(); true }
+                    if (hasMenu) onLongClick(menuLabel) { menuOpen = true; true }
+                    this.customActions = customActions
                 },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            OpenCodeIcon(
-                if (header.isCollapsed) SFSymbol.ChevronRight else SFSymbol.ChevronDown,
-                contentDescription = null,
-                size = 14.dp,
-                tint = colors.secondaryText,
-            )
+            Box(Modifier.width(22.dp), contentAlignment = Alignment.CenterStart) {
+                OpenCodeIcon(SFSymbol.Folder, contentDescription = null, tint = colors.secondaryText)
+            }
             Text(
                 header.name,
-                style = DrawerTunables.rowFont.font.copy(fontWeight = FontWeight.SemiBold),
+                style = DrawerTunables.rowFont.font,
                 color = colors.text,
                 maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
             Text(
                 "${header.count}",
                 style = DrawerTunables.rowFont.font.copy(fontFeatureSettings = "tnum"),
                 color = colors.secondaryText,
             )
+            OpenCodeIcon(SFSymbol.ChevronRight, contentDescription = null, size = 14.dp, tint = colors.tertiaryText)
         }
+        GroupMenu(expanded = menuOpen, header = header, onDismiss = { menuOpen = false }, actions = { currentActions })
+    }
+}
+
+/**
+ * Inside a group: back, its name and its size, above its sessions. A hold on the name opens the
+ * group's Rename and Remove, which TalkBack also offers as actions.
+ */
+@Composable
+fun DrawerListGroupTitleRow(
+    header: DrawerListGroupHeader,
+    onBack: () -> Unit,
+    actions: DrawerGroupHeaderActions,
+    modifier: Modifier = Modifier,
+) {
+    val colors = OpenCodeTheme.colors
+    val count = pluralStringResource(R.plurals.drawer_group_session_count, header.count, header.count)
+    var menuOpen by remember { mutableStateOf(false) }
+    val menuLabel = stringResource(R.string.drawer_selection_more_options_description)
+    val currentActions by rememberUpdatedState(actions)
+    val titleHeader = header.copy(canMoveUp = false, canMoveDown = false)
+    val hasMenu = titleHeader.canRename || titleHeader.canRemove
+    val customActions = groupCustomActions(titleHeader) { currentActions }
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = DrawerMetrics.rowEdge)
+            .heightIn(min = DrawerMetrics.rowHeight)
+            .testTag("drawer-group-title-${header.id}"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         OpenCodeIconButton(
-            SFSymbol.Plus,
-            contentDescription = newSessionLabel,
-            onClick = actions.newSession,
+            SFSymbol.ChevronBackward,
+            contentDescription = stringResource(CoreR.string.common_back),
+            onClick = onBack,
             style = OpenCodeIconButtonStyle.Standard,
-            modifier = Modifier.testTag("drawer-group-new-session-${header.id}"),
+            modifier = Modifier.testTag("drawer-group-back"),
         )
-        if (reorderable || header.canRename || header.canRemove) Box {
-            OpenCodeIconButton(
-                SFSymbol.Ellipsis,
-                contentDescription = stringResource(R.string.drawer_selection_more_options_description),
-                onClick = { menuOpen = true },
-                style = OpenCodeIconButtonStyle.Standard,
-            )
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                if (header.canMoveUp) {
-                    DropdownMenuItem(
-                        text = { Text(moveUpLabel) },
-                        leadingIcon = { OpenCodeIcon(SFSymbol.ArrowUp, contentDescription = null) },
-                        onClick = { menuOpen = false; actions.moveUp() },
-                    )
-                }
-                if (header.canMoveDown) {
-                    DropdownMenuItem(
-                        text = { Text(moveDownLabel) },
-                        leadingIcon = { OpenCodeIcon(SFSymbol.ArrowDown, contentDescription = null) },
-                        onClick = { menuOpen = false; actions.moveDown() },
-                    )
-                }
-                if (header.canRename) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.drawer_group_rename)) },
-                        leadingIcon = { OpenCodeIcon(SFSymbol.Pencil, contentDescription = null) },
-                        onClick = { menuOpen = false; actions.rename() },
-                    )
-                }
-                if (header.canRemove) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.drawer_group_remove), color = colors.destructive) },
-                        leadingIcon = { OpenCodeIcon(SFSymbol.Trash, contentDescription = null, tint = colors.destructive) },
-                        onClick = { menuOpen = false; actions.remove() },
-                    )
-                }
+        Box(Modifier.weight(1f)) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = DrawerMetrics.rowHeight)
+                    .then(if (hasMenu) Modifier.pointerInput(Unit) { detectTapGestures(onLongPress = { menuOpen = true }) } else Modifier)
+                    .padding(start = 4.dp, end = DrawerMetrics.trailingInset)
+                    .clearAndSetSemantics {
+                        contentDescription = "${header.name}, $count"
+                        heading()
+                        if (hasMenu) onLongClick(menuLabel) { menuOpen = true; true }
+                        this.customActions = customActions
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    header.name,
+                    style = DrawerTunables.rowFont.font.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "${header.count}",
+                    style = DrawerTunables.rowFont.font.copy(fontFeatureSettings = "tnum"),
+                    color = colors.secondaryText,
+                )
             }
+            GroupMenu(expanded = menuOpen, header = titleHeader, onDismiss = { menuOpen = false }, actions = { currentActions })
         }
     }
+}
+
+/** A group's management as TalkBack actions: the same entries as its menu. */
+@Composable
+private fun groupCustomActions(header: DrawerListGroupHeader, actions: () -> DrawerGroupHeaderActions): List<CustomAccessibilityAction> {
+    val moveUp = stringResource(R.string.drawer_move_up)
+    val moveDown = stringResource(R.string.drawer_move_down)
+    val rename = stringResource(R.string.drawer_group_rename)
+    val remove = stringResource(R.string.drawer_group_remove)
+    return buildList {
+        if (header.canMoveUp) add(CustomAccessibilityAction(moveUp) { actions().moveUp(); true })
+        if (header.canMoveDown) add(CustomAccessibilityAction(moveDown) { actions().moveDown(); true })
+        if (header.canRename) add(CustomAccessibilityAction(rename) { actions().rename(); true })
+        if (header.canRemove) add(CustomAccessibilityAction(remove) { actions().remove(); true })
+    }
+}
+
+/** A group's menu: Move Up and Move Down while it can trade places, then Rename and Remove. */
+@Composable
+private fun GroupMenu(expanded: Boolean, header: DrawerListGroupHeader, onDismiss: () -> Unit, actions: () -> DrawerGroupHeaderActions) {
+    val colors = OpenCodeTheme.colors
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss, modifier = Modifier.testTag("drawer-group-menu")) {
+        if (header.canMoveUp) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.drawer_move_up)) },
+                leadingIcon = { OpenCodeIcon(SFSymbol.ArrowUp, contentDescription = null) },
+                onClick = { onDismiss(); actions().moveUp() },
+            )
+        }
+        if (header.canMoveDown) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.drawer_move_down)) },
+                leadingIcon = { OpenCodeIcon(SFSymbol.ArrowDown, contentDescription = null) },
+                onClick = { onDismiss(); actions().moveDown() },
+            )
+        }
+        if (header.canRename) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.drawer_group_rename)) },
+                leadingIcon = { OpenCodeIcon(SFSymbol.Pencil, contentDescription = null) },
+                onClick = { onDismiss(); actions().rename() },
+            )
+        }
+        if (header.canRemove) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.drawer_group_remove), color = colors.destructive) },
+                leadingIcon = { OpenCodeIcon(SFSymbol.Trash, contentDescription = null, tint = colors.destructive) },
+                onClick = { onDismiss(); actions().remove() },
+            )
+        }
+    }
+}
+
+/**
+ * The list's move between levels, the Archived page's shared axis X: going into a group the new
+ * level arrives from the right, coming back from the left. [back] follows a predictive back drag
+ * from 0 to 1.
+ */
+@Stable
+internal class DrawerLevelTransition {
+    val progress = Animatable(1f)
+    val back = Animatable(0f)
+    var direction: Float by mutableFloatStateOf(1f)
+}
+
+/** The transition for the list's [depth] (0: the root). The level shown first arrives at rest. */
+@Composable
+internal fun rememberDrawerLevelTransition(depth: Int, reduceMotion: Boolean): DrawerLevelTransition {
+    val transition = remember { DrawerLevelTransition() }
+    val shown = remember { intArrayOf(depth) }
+    LaunchedEffect(depth) {
+        val previous = shown[0]
+        if (previous == depth) return@LaunchedEffect
+        shown[0] = depth
+        transition.direction = if (depth > previous) 1f else -1f
+        transition.progress.snapTo(0f)
+        transition.back.snapTo(0f)
+        transition.progress.animateTo(1f, MotionRole.Layout.animation(MotionPhase.Enter, reduceMotion))
+    }
+    return transition
+}
+
+private val LevelSlide = 30.dp
+
+/** The list as its level arrives: a short slide and fade (only the fade under Reduce Motion); a back drag eases it toward the edge. */
+internal fun Modifier.drawerLevel(transition: DrawerLevelTransition, reduceMotion: Boolean): Modifier = graphicsLayer {
+    val p = transition.progress.value
+    val back = (transition.back.value / 0.5f).coerceIn(0f, 1f)
+    if (p >= 1f && back == 0f) return@graphicsLayer
+    alpha = p * (1f - 0.3f * back)
+    if (reduceMotion) return@graphicsLayer
+    translationX = transition.direction * LevelSlide.toPx() * (1f - p) + 24.dp.toPx() * back
 }
 
 /** The New Group row's sharing menu, as closures. */

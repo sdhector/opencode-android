@@ -1,6 +1,7 @@
 package ai.opencode.feature.drawer.list
 
 import ai.opencode.core.strings.localized
+import ai.opencode.feature.drawer.DrawerGroupSessions
 import ai.opencode.feature.drawer.DrawerListFooter
 import ai.opencode.feature.drawer.GroupSharingStatus
 import ai.opencode.feature.drawer.groupSharingStatus
@@ -14,6 +15,7 @@ import ai.opencode.feature.drawer.drawerListFooter
 import ai.opencode.feature.drawer.drawerSessions
 import ai.opencode.feature.drawer.hiddenSessionIDs
 import ai.opencode.feature.drawer.placeholderSession
+import ai.opencode.feature.drawer.shownDrawerGroup
 import ai.opencode.feature.drawer.shownGroups
 import ai.opencode.feature.drawer.statusSnapshot
 import ai.opencode.feature.drawer.style.DrawerSectionHeaderKind
@@ -39,8 +41,10 @@ sealed interface DrawerListItem {
     data object Archived : DrawerListItem
     data class Header(val kind: DrawerSectionHeaderKind) : DrawerListItem
     data class Session(val id: String) : DrawerListItem
-    /** A local group's header ([DrawerListGroupHeader]); its sessions follow while it is open. */
+    /** A group's row ([DrawerListGroupHeader]): it opens the group; while searching, its matches follow it. */
     data class GroupHeader(val groupID: String) : DrawerListItem
+    /** Inside a group: its name, count and the way back ([DrawerListModel.tray]), above its sessions. */
+    data class GroupTitle(val groupID: String) : DrawerListItem
     /** Ends the group section: makes a group. */
     data object NewGroup : DrawerListItem
     /** Under Recents' header while a pinned or grouped row is lifted and Recents has none: where it drops. */
@@ -62,6 +66,7 @@ sealed interface DrawerListItem {
             is Header -> "header-${kind.name}"
             is Session -> "session-$id"
             is GroupHeader -> "group-$groupID"
+            is GroupTitle -> "group-title-$groupID"
             NewGroup -> "new-group"
             RecentsDrop -> "recents-drop"
             Empty -> "empty"
@@ -95,6 +100,8 @@ data class DrawerListRow(
     val groupID: String? = null,
     /** The row shows under its group's header. */
     val inGroup: Boolean = false,
+    /** A held row can be lifted to pin, unpin or move it; inside a group a hold only chooses it. */
+    val canLift: Boolean = true,
 ) {
     enum class Unsent { Sending, Failed }
 
@@ -119,15 +126,13 @@ data class DrawerListRow(
         }
 }
 
-/** A group's header as the list shows it. */
+/** A group's row (or, inside it, its title) as the list shows it. */
 data class DrawerListGroupHeader(
     val id: String,
     val name: String,
     /** Sessions in the group that this phone has loaded, whether or not they show. */
     val count: Int,
-    /** Closed: its sessions don't show. Searching opens every group that has a match. */
-    val isCollapsed: Boolean,
-    /** The sessions showing under it, in order: none while it is closed. */
+    /** The sessions showing under it, in order: only search's matches, since a tap opens the group. */
     val sessionIDs: List<String> = emptyList(),
     /** It can trade places with the group above or below it; never while searching. */
     val canMoveUp: Boolean = false,
@@ -178,6 +183,8 @@ data class DrawerListModel(
     val reducedMotion: Boolean = false,
     /** The New Group row's sharing menu; null without one. */
     val groupSharing: GroupSharingStatus? = null,
+    /** The group the list is inside, with its title; null at the root and while searching. */
+    val tray: DrawerListGroupHeader? = null,
 ) {
     /** Every item in display order. */
     val items: List<DrawerListItem> get() = order.flatMap { sections[it].orEmpty() }
@@ -187,8 +194,8 @@ data class DrawerListModel(
         const val ghostCount = 5
 
         /**
-         * Home's state as the drawer shows it: shortcuts, then Pinned and Recents with their
-         * headers. [project] resolves a row's project. Every row has a project: a session in the
+         * Home's state as the drawer shows it: shortcuts, then Pinned, the groups' rows and Recents
+         * with their headers; inside a group, only its sessions ([tray]). [project] resolves a row's project. Every row has a project: a session in the
          * home folder or at the server's root gets one derived from its directory, so its tile is
          * stable from the first frame.
          */
@@ -279,22 +286,12 @@ data class DrawerListModel(
                 return if (inputs.alwaysShowsHeaders || follows) listOf(DrawerListItem.Header(kind)) else emptyList()
             }
 
-            // The New Group row shows while the list is not searched; searching shows only groups with a match.
-            val showsGroupSection = !searching || sessions.groups.any { it.sessions.isNotEmpty() }
-            val pinnedItems = mutableListOf<DrawerListItem>()
-            if (pinned.isNotEmpty()) {
-                pinnedItems += header(DrawerSectionHeaderKind.Pinned, follows = showsShortcuts)
-                for (session in pinned) {
-                    rows[session.id] = row(session, pinned = true)
-                    pinnedItems += DrawerListItem.Session(session.id)
-                }
-            }
-            // Unsent sessions lead Recents: they wait on you, and the server can't order them.
+            // Unsent sessions lead Recents (or their group): they wait on you, and the server can't order them.
             val open = if (state.catchUp == null) state.sessionDetail else null
             val unsentRows = mutableListOf<DrawerListRow>()
             for (draft in state.unsentDrafts) {
                 val session = draft.placeholderSession
-                if (session.id in rows || state.sessions.any { it.id == session.id }) continue
+                if (state.sessions.any { it.id == session.id }) continue
                 if (state.search.isNotEmpty() && !session.title.contains(state.search.trim(), ignoreCase = true)) continue
                 unsentRows += DrawerListRow(
                     session = session,
@@ -313,6 +310,22 @@ data class DrawerListModel(
                     groupID = membership[session.id],
                 )
             }
+
+            val trayEntry = state.shownDrawerGroup?.let { group -> sessions.groups.firstOrNull { it.group.id == group.id } }
+            if (trayEntry != null) {
+                return tray(state, inputs, trayEntry, unsentRows, membership, shortcuts, swap?.id) { row(it, pinned = false, inGroup = true) }
+            }
+
+            // The New Group row shows while the list is not searched; searching shows only groups with a match.
+            val showsGroupSection = !searching || sessions.groups.any { it.sessions.isNotEmpty() }
+            val pinnedItems = mutableListOf<DrawerListItem>()
+            if (pinned.isNotEmpty()) {
+                pinnedItems += header(DrawerSectionHeaderKind.Pinned, follows = showsShortcuts)
+                for (session in pinned) {
+                    rows[session.id] = row(session, pinned = true)
+                    pinnedItems += DrawerListItem.Session(session.id)
+                }
+            }
             val groupItems = mutableListOf<DrawerListItem>()
             val groupHeaders = LinkedHashMap<String, DrawerListGroupHeader>()
             for ((index, entry) in sessions.groups.withIndex()) {
@@ -321,20 +334,20 @@ data class DrawerListModel(
                 val listed = entry.sessions.filter { it.id !in rows }
                 val count = unsentHere.size + listed.size
                 if (searching && count == 0) continue
-                val collapsed = entry.group.isCollapsed && !searching
+                // A group's sessions show in it once it's opened; search lists its matches under its row.
+                val showsRows = searching && id != foldedGroupID
                 groupHeaders[id] = DrawerListGroupHeader(
                     id = id,
                     name = entry.group.name,
                     count = count,
-                    isCollapsed = collapsed,
-                    sessionIDs = if (collapsed || id == foldedGroupID) emptyList() else unsentHere.map { it.session.id } + listed.map { it.id },
+                    sessionIDs = if (showsRows) unsentHere.map { it.session.id } + listed.map { it.id } else emptyList(),
                     canMoveUp = reorderable && !searching && index > 0,
                     canMoveDown = reorderable && !searching && index < sessions.groups.lastIndex,
                     canRename = state.canEditGroups("rename"),
                     canRemove = state.canEditGroups("remove"),
                 )
                 groupItems += DrawerListItem.GroupHeader(id)
-                if (collapsed || id == foldedGroupID) continue
+                if (!showsRows) continue
                 for (unsent in unsentHere) {
                     rows[unsent.session.id] = unsent.copy(inGroup = true)
                     groupItems += DrawerListItem.Session(unsent.session.id)
@@ -388,6 +401,67 @@ data class DrawerListModel(
                 serverID = swap?.id ?: state.server.persistenceID,
                 groupSharing = state.groupSharingStatus,
                 reducedMotion = inputs.reducedMotion,
+            )
+        }
+
+        /**
+         * Inside a group: its title, then only its sessions as Recents shows them (unsent first, then
+         * newest), and the footer while the group has members the loaded pages haven't reached.
+         */
+        private fun tray(
+            state: HomeFeature.State,
+            inputs: DrawerListInputs,
+            entry: DrawerGroupSessions,
+            unsentRows: List<DrawerListRow>,
+            membership: Map<String, String>,
+            shortcuts: DrawerListShortcuts,
+            swapID: String?,
+            row: (OpenCodeSession) -> DrawerListRow,
+        ): DrawerListModel {
+            val id = entry.group.id
+            val rows = LinkedHashMap<String, DrawerListRow>()
+            val items = mutableListOf<DrawerListItem>()
+            for (unsent in unsentRows) {
+                if (membership[unsent.session.id] != id) continue
+                rows[unsent.session.id] = unsent.copy(inGroup = true, canLift = false)
+                items += DrawerListItem.Session(unsent.session.id)
+            }
+            for (session in entry.sessions) {
+                if (session.id in rows) continue
+                rows[session.id] = row(session).copy(canLift = false)
+                items += DrawerListItem.Session(session.id)
+            }
+            val known = HashSet<String>()
+            for (session in state.sessions) known += session.id
+            for (unsent in unsentRows) known += unsent.session.id
+            val hasUnlisted = entry.group.sessionIDs.any { it !in known && it !in state.recentlyDeletedIDs }
+            val footer = state.drawerListFooter?.takeIf { hasUnlisted }
+            val end = when {
+                footer != null -> listOf(DrawerListItem.Footer)
+                items.isEmpty() -> listOf(DrawerListItem.Empty)
+                else -> emptyList()
+            }
+            return DrawerListModel(
+                sections = mapOf(
+                    DrawerListSection.top to listOf(DrawerListItem.GroupTitle(id)),
+                    DrawerListSection.pinned to emptyList(),
+                    DrawerListSection.groups to items,
+                    DrawerListSection.recents to end,
+                ),
+                rows = rows,
+                shortcuts = shortcuts,
+                search = state.search,
+                footer = footer,
+                pagesRead = if (footer != null) state.sessionPages.pagesRead else 0,
+                serverID = swapID ?: state.server.persistenceID,
+                reducedMotion = inputs.reducedMotion,
+                tray = DrawerListGroupHeader(
+                    id = id,
+                    name = entry.group.name,
+                    count = items.size,
+                    canRename = state.canEditGroups("rename"),
+                    canRemove = state.canEditGroups("remove"),
+                ),
             )
         }
     }

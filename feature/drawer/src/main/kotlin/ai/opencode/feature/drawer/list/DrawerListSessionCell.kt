@@ -297,7 +297,7 @@ fun DrawerListSessionCell(
                 .drawerRowInteraction(
                     interaction = DrawerRowInteraction(
                         sessionID = row.session.id,
-                        reorderable = row.unsent == null,
+                        reorderable = row.unsent == null && row.canLift,
                         holdable = row.unsent == null,
                         isPinnedSection = row.isPinnedSection,
                         select = { currentActions.select() },

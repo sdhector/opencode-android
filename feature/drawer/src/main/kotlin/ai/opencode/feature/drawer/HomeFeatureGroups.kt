@@ -16,9 +16,9 @@ import ai.opencode.feature.drawer.groups.SessionGroup
 import ai.opencode.feature.drawer.groups.SessionGroups
 
 /*
- * Session Groups: named, collapsible bundles of root sessions, on this phone or shared through the
- * server's plugin (`HomeFeatureSharedGroups.kt`). Nothing here touches a session's title, archive,
- * project or directory.
+ * Session Groups: named bundles of root sessions, on this phone or shared through the server's plugin
+ * (`HomeFeatureSharedGroups.kt`), that the drawer opens one at a time (`drawerPath`). Nothing here
+ * touches a session's title, archive, project or directory.
  */
 
 /** `$sessionGroups.withLock { … }`. */
@@ -34,6 +34,25 @@ val State.serverGroups: List<SessionGroup> get() = shownGroups.groups(server.per
 
 fun State.groupID(sessionID: String): String? = shownGroups.groupID(server.persistenceID, sessionID)
 
+/** The group the drawer is inside, while it still exists; null at the root. */
+val State.openGroup: SessionGroup?
+    get() {
+        val groupID = drawerPath.groupID ?: return null
+        return shownGroups.group(server.persistenceID, groupID)
+    }
+
+/** The group whose sessions the drawer's list shows: [openGroup], except while searching, which lists every match. */
+val State.shownDrawerGroup: SessionGroup? get() = if (search.isEmpty()) openGroup else null
+
+/** Drops the path's levels whose group is gone (removed, or no longer on a shared server); runs after every action. */
+internal fun State.resolvingDrawerPath(): State {
+    if (drawerPath.isRoot) return this
+    val shown = shownGroups
+    val serverID = server.persistenceID
+    val resolved = drawerPath.resolved { shown.group(serverID, it) != null }
+    return if (resolved == drawerPath) this else copy(drawerPath = resolved)
+}
+
 internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced {
     val haptics = dependency(HapticsClient)
     val serverID = state.server.persistenceID
@@ -45,6 +64,18 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
             val visit = opened.sessionDetail?.visit ?: return Reduced(opened)
             return Reduced(opened.copy(draftGroup = DraftGroupTarget(serverID, visit, action.groupID)))
         }
+
+        Action.DrawerNewSessionTapped -> {
+            val group = state.shownDrawerGroup ?: return reduceDrawer(state, Action.NewSessionTapped)
+            return reduceGroups(state, Action.NewSessionInGroupTapped(group.id))
+        }
+
+        is Action.DrawerGroupOpened -> {
+            if (state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
+            return Reduced(state.copy(drawerPath = state.drawerPath.opening(action.groupID)))
+        }
+
+        Action.DrawerGroupBackTapped -> return Reduced(state.copy(drawerPath = state.drawerPath.back()))
 
         is Action.CreateGroup -> {
             if (SessionGroups.normalizedName(action.name) == null) return Reduced(state)
@@ -59,13 +90,6 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
             if (!state.canEditGroups("rename") || state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
             if (SessionGroups.normalizedName(action.name) == null) return Reduced(state)
             return Reduced(state.editingGroups(GroupEdit.Rename(action.groupID, action.name)))
-        }
-
-        is Action.ToggleGroupCollapsed -> {
-            if (state.sharedGroups != null) return reduceSharedGroups(state, action)
-            val group = state.sessionGroups.group(serverID, action.groupID) ?: return Reduced(state)
-            haptics.play(Haptic.selection)
-            return Reduced(state.updatingSessionGroups { it.settingCollapsed(serverID, action.groupID, !group.isCollapsed) })
         }
 
         is Action.RemoveGroup -> {

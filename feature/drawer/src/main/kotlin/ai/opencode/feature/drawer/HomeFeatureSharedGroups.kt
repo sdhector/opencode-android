@@ -199,14 +199,6 @@ internal fun HomeFeature.reduceSharedGroups(state: State, action: Action): HomeR
             return Reduced(readFinished(state, action.read))
         }
 
-        is Action.ToggleGroupCollapsed -> {
-            val shared = state.sharedGroups ?: return Reduced(state)
-            if (state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
-            haptics.play(Haptic.selection)
-            val collapsed = action.groupID in shared.collapsedIDs
-            return Reduced(state.updatingShared { it.copy(collapsedIDs = if (collapsed) it.collapsedIDs - action.groupID else it.collapsedIDs + action.groupID) })
-        }
-
         is Action.SharedGroupsWritten -> {
             if (action.serverID != serverID) return Reduced(state)
             return writeFinished(state, action)
@@ -484,7 +476,7 @@ private fun HomeFeature.writeFinished(state: State, action: Action.SharedGroupsW
 }
 
 /**
- * The server named the group [edit] made: the edits, collapse and draft that used the phone's ID for
+ * The server named the group [edit] made: the edits, collapse, draft and drawer path that used the phone's ID for
  * it move to the server's. A create answered by a matching retry still finds it, as the newest group
  * the snapshot before it didn't have.
  */
@@ -512,6 +504,8 @@ private fun adoptingCreatedGroup(
     if (from in s.sharedGroups?.collapsedIDs.orEmpty()) s = s.updatingShared { it.copy(collapsedIDs = it.collapsedIDs - from + to) }
     val draft = s.draftGroup
     if (draft != null && draft.groupID == from) s = s.copy(draftGroup = draft.copy(groupID = to))
+    val path = s.drawerPath.renamingGroup(from, to)
+    if (path != s.drawerPath) s = s.copy(drawerPath = path)
     return s
 }
 

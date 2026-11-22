@@ -53,8 +53,6 @@
     <string name="drawer_group_move">Move to Group</string>
     <string name="drawer_group_remove_from">Remove from Group</string>
     <string name="drawer_group_new_session">New Session in “%1$s”</string>
-    <string name="drawer_group_expanded_state">Expanded</string>
-    <string name="drawer_group_collapsed_state">Collapsed</string>
     <string name="drawer_drop_to_recents">Drop to Move to Recents</string>
     <plurals name="drawer_group_session_count">
         <item quantity="one">%1$d session</item>

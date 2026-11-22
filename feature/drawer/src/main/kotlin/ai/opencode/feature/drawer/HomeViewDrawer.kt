@@ -30,6 +30,8 @@ import ai.opencode.feature.drawer.list.DrawerGroupDialogs
 import ai.opencode.feature.drawer.list.DrawerListActions
 import ai.opencode.feature.drawer.list.DrawerListInputs
 import ai.opencode.feature.drawer.list.DrawerListView
+import ai.opencode.feature.drawer.list.drawerLevel
+import ai.opencode.feature.drawer.list.rememberDrawerLevelTransition
 import ai.opencode.feature.drawer.list.ArchivedPage
 import ai.opencode.feature.drawer.list.archivedBeneath
 import ai.opencode.feature.drawer.list.archivedPage
@@ -83,6 +85,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import ai.opencode.core.ui.OpenCodeAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -193,6 +197,11 @@ fun HomeDrawer(
     val search by store.observe { it.search }
     val failure by store.observe { it.deletionError ?: it.inboxSidebarStatus.archiveError ?: it.groupsError }
     val inboxSidebarOn = rememberInboxSidebarOn()
+    // The group the list is inside (the Inbox Sidebar has no groups), and the one it shows: none while searching.
+    val depth by store.observe { it.drawerPath.groupIDs.size }
+    val shownGroup by store.observe { it.shownDrawerGroup }
+    val levelDepth = if (inboxSidebarOn) 0 else depth
+    val trayGroup = shownGroup.takeUnless { inboxSidebarOn }
     val current by store.observe { it.server }
     val switchingTo by store.observe { it.switchingTo }
     val serverSwapTarget = ServerSwapTarget(current, switchingTo)
@@ -218,6 +227,20 @@ fun HomeDrawer(
             } else {
                 viewState.selectSession(id)
             }
+        }
+    }
+    // Inside a group: back (system back, or once the selection has ended) goes up a level, and a
+    // predictive back drag moves the list with the finger. Each level keeps its own scroll.
+    val levelTransition = rememberDrawerLevelTransition(levelDepth, reducedMotion)
+    val rootListState = rememberLazyListState()
+    val groupListState = remember(trayGroup?.id) { LazyListState() }
+    PredictiveBackHandler(enabled = isDrawerVisible && trayGroup != null && !viewState.showsArchived) { events ->
+        try {
+            events.collect { levelTransition.back.snapTo(it.progress) }
+            store.send(HomeFeature.Action.DrawerGroupBackTapped)
+        } catch (cancel: CancellationException) {
+            levelTransition.back.animateTo(0f, MotionRole.Layout.animation(MotionPhase.Enter, reducedMotion))
+            throw cancel
         }
     }
     // The Archived page: back (system back, or once the selection has ended) returns to the list,
@@ -274,7 +297,14 @@ fun HomeDrawer(
             openWhatsNew = viewState::openWhatsNew,
             hideWhatsNew = { store.send(HomeFeature.Action.WhatsNew(WhatsNewFeature.Action.HideTapped)) },
             openArchived = openArchived,
-            newSessionInGroup = viewState::startNewSessionInGroup,
+            openGroup = { id ->
+                selection.clear()
+                viewState.openGroup(id)
+            },
+            groupBack = {
+                selection.clear()
+                store.send(HomeFeature.Action.DrawerGroupBackTapped)
+            },
             editGroups = { viewState.groupEditor.request = it },
         )
     }
@@ -318,7 +348,8 @@ fun HomeDrawer(
             catchUpFocusRequests = viewState.catchUpFocusRequests,
             actions = actions,
             contentPadding = listPadding,
-            modifier = Modifier.fillMaxSize().then(beneathArchived),
+            modifier = Modifier.fillMaxSize().then(beneathArchived).drawerLevel(levelTransition, reducedMotion),
+            listState = if (trayGroup != null) groupListState else rootListState,
         )
         // The list as the drawer's pan sees it: between the title band and the controls, which take
         // their own touches.
@@ -449,7 +480,11 @@ fun HomeDrawer(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                DrawerNewSessionButton(enabled = !disconnected, onClick = viewState::startNewSessionFromDrawer)
+                DrawerNewSessionButton(
+                    enabled = !disconnected,
+                    groupName = trayGroup?.name,
+                    onClick = { viewState.startNewSessionFromDrawer(showsGroups = !inboxSidebarOn) },
+                )
                 Spacer(Modifier.weight(1f))
                 DrawerFooterTrailing(store, disconnected, reducedMotion, onOpenSettings = viewState::openSettings)
             }
@@ -503,10 +538,11 @@ fun HomeDeleteConfirmation(store: StoreOf<HomeFeature.State, HomeFeature.Action>
 /**
  * New Session's pill. The symbol's ink sits as far from the pill's leading end as from its top at
  * every text size, so its leading padding shrinks as the symbol grows; the trailing stays
- * `footerPadding`. Disconnected, the label dims (not the capsule) and it takes no taps.
+ * `footerPadding`. Disconnected, the label dims (not the capsule) and it takes no taps. Inside a
+ * group ([groupName]) it starts the session there, and TalkBack says so.
  */
 @Composable
-private fun DrawerNewSessionButton(enabled: Boolean, onClick: () -> Unit) {
+private fun DrawerNewSessionButton(enabled: Boolean, groupName: String?, onClick: () -> Unit) {
     val colors = OpenCodeTheme.colors
     // The label caps at accessibility1 (28 sp over 17 sp body).
     val fontScale = min(LocalDensity.current.fontScale, 28f / 17f)
@@ -516,6 +552,7 @@ private fun DrawerNewSessionButton(enabled: Boolean, onClick: () -> Unit) {
     val rise = DrawerTunables.footerGlyphRise.value * glyph / 17f
     val tint = if (enabled) colors.text else colors.tertiaryText
     val newSession = stringResource(R.string.drawer_new_session)
+    val description = if (groupName == null) newSession else stringResource(R.string.drawer_group_new_session, groupName)
     Surface(
         // The desktop's floating control: the popover fill, hairline ring and a soft shadow, at the
         // floating panels' radius so the tall footer buttons don't read as keys.
@@ -529,7 +566,7 @@ private fun DrawerNewSessionButton(enabled: Boolean, onClick: () -> Unit) {
             .openCodeTapTarget()
             .testTag("drawer-new-session")
             .clearAndSetSemantics {
-                contentDescription = newSession
+                contentDescription = description
                 role = Role.Button
                 if (!enabled) disabled()
                 onClick { onClick(); true }

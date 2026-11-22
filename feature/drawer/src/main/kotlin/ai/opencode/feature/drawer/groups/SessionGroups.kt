@@ -4,11 +4,12 @@ import ai.opencode.core.sharing.FileDirectory
 import ai.opencode.core.sharing.SharedKey
 import kotlinx.serialization.Serializable
 
-/** A named, collapsible bundle of root sessions on one server: phone-local, or a shared server's (`SharedGroupsServer`). */
+/** A named bundle of root sessions on one server: phone-local, or a shared server's (`SharedGroupsServer`). */
 @Serializable
 data class SessionGroup(
     val id: String,
     val name: String,
+    /** Kept as saved so files round-trip; the drawer opens a group as its own list and no longer folds it. */
     val isCollapsed: Boolean = false,
     val sessionIDs: List<String> = emptyList(),
 )
@@ -48,9 +49,6 @@ data class SessionGroups(val byServer: Map<String, List<SessionGroup>> = emptyMa
         val trimmed = normalizedName(name) ?: return this
         return updating(serverID, groupID) { it.copy(name = trimmed) }
     }
-
-    fun settingCollapsed(serverID: String, groupID: String, collapsed: Boolean): SessionGroups =
-        updating(serverID, groupID) { it.copy(isCollapsed = collapsed) }
 
     /** Removes the group only: its sessions keep everything else. */
     fun removing(serverID: String, groupID: String): SessionGroups =

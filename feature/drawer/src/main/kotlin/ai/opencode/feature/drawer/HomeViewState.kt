@@ -137,18 +137,20 @@ class HomeViewState internal constructor(
         closeSessionDrawer()
     }
 
-    /** New Session in the drawer. */
-    fun startNewSessionFromDrawer() {
+    /**
+     * New Session in the drawer: in the group the list is inside, when [showsGroups] (the regular
+     * list, not the Inbox Sidebar), otherwise a plain one.
+     */
+    fun startNewSessionFromDrawer(showsGroups: Boolean = true) {
         keyboardHold?.cardWillChange()
         closeSessionDrawer()
-        store.send(HomeFeature.Action.NewSessionTapped)
+        store.send(if (showsGroups) HomeFeature.Action.DrawerNewSessionTapped else HomeFeature.Action.NewSessionTapped)
     }
 
-    /** A group header's + in the drawer. */
-    fun startNewSessionInGroup(groupID: String) {
-        keyboardHold?.cardWillChange()
-        closeSessionDrawer()
-        store.send(HomeFeature.Action.NewSessionInGroupTapped(groupID))
+    /** A group's row in the drawer: the list goes inside it, out of any search. */
+    fun openGroup(groupID: String) {
+        endSearch()
+        store.send(HomeFeature.Action.DrawerGroupOpened(groupID))
     }
 
     /** The drawer's Catch Up row. */
