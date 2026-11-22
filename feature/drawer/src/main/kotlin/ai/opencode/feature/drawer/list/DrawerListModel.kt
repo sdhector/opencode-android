@@ -125,6 +125,9 @@ data class DrawerListGroupHeader(
     val isCollapsed: Boolean,
     /** The sessions showing under it, in order: none while it is closed. */
     val sessionIDs: List<String> = emptyList(),
+    /** It can trade places with the group above or below it; never while searching. */
+    val canMoveUp: Boolean = false,
+    val canMoveDown: Boolean = false,
 )
 
 /** What the list shows besides its rows. */
@@ -187,6 +190,8 @@ data class DrawerListModel(
             now: Instant,
             timestamp: (date: Instant, now: Instant) -> String,
             project: (OpenCodeSession, List<OpenCodeProject>) -> OpenCodeProject?,
+            /** The group whose header is being dragged: its rows fold under it until it lands. */
+            foldedGroupID: String? = null,
         ): DrawerListModel {
             var serverNote: ServerSwitchNote? = null
             val swap = inputs.serverSwap
@@ -300,7 +305,7 @@ data class DrawerListModel(
             }
             val groupItems = mutableListOf<DrawerListItem>()
             val groupHeaders = LinkedHashMap<String, DrawerListGroupHeader>()
-            for (entry in sessions.groups) {
+            for ((index, entry) in sessions.groups.withIndex()) {
                 val id = entry.group.id
                 val unsentHere = unsentRows.filter { membership[it.session.id] == id && it.session.id !in rows }
                 val listed = entry.sessions.filter { it.id !in rows }
@@ -312,10 +317,12 @@ data class DrawerListModel(
                     name = entry.group.name,
                     count = count,
                     isCollapsed = collapsed,
-                    sessionIDs = if (collapsed) emptyList() else unsentHere.map { it.session.id } + listed.map { it.id },
+                    sessionIDs = if (collapsed || id == foldedGroupID) emptyList() else unsentHere.map { it.session.id } + listed.map { it.id },
+                    canMoveUp = !searching && index > 0,
+                    canMoveDown = !searching && index < sessions.groups.lastIndex,
                 )
                 groupItems += DrawerListItem.GroupHeader(id)
-                if (collapsed) continue
+                if (collapsed || id == foldedGroupID) continue
                 for (unsent in unsentHere) {
                     rows[unsent.session.id] = unsent.copy(inGroup = true)
                     groupItems += DrawerListItem.Session(unsent.session.id)

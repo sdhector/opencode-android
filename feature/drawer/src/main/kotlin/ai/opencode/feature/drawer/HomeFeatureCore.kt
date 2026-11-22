@@ -191,6 +191,10 @@ private fun HomeFeature.coreRoute(state: State, action: Action): Reduced<State, 
     is Action.ToggleGroupCollapsed,
     is Action.RemoveGroup,
     is Action.MoveSessionsToGroup,
+    is Action.MoveGroupUp,
+    is Action.MoveGroupDown,
+    is Action.DrawerGroupDropReleased,
+    is Action.DrawerGroupDropped,
     -> reduceGroups(state, action)
 
     is Action.DrawerRowDroppedInGroup -> reduceGroups(state.adoptingSearchResultFor(action), action)

@@ -718,6 +718,13 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data class MoveSessionsToGroup(val sessionIDs: List<String>, val groupID: String?) : Action
         /** A dragged row dropped on a group, or on Recents when [groupID] is null: it shows there, unpinned. */
         data class DrawerRowDroppedInGroup(val sessionID: String, val groupID: String?) : Action
+        /** A group's Move Up and Move Down (its menu, TalkBack): it trades places with the group beside it. */
+        data class MoveGroupUp(val groupID: String) : Action
+        data class MoveGroupDown(val groupID: String) : Action
+        /** A dragged group header was let go over slot [index]: the snap, when the order changes. */
+        data class DrawerGroupDropReleased(val groupID: String, val index: Int) : Action
+        /** A dragged group header landed: the group takes [index] among this server's groups. */
+        data class DrawerGroupDropped(val groupID: String, val index: Int) : Action
         /** A computer paired for the first time: open the drawer on its sessions. */
         data object PairedComputerOpened : Action
         /** The install's first computer paired: a ready session in its latest project, with starter prompts. */

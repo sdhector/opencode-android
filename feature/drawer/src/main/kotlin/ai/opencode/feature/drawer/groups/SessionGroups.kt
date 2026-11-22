@@ -56,6 +56,18 @@ data class SessionGroups(val byServer: Map<String, List<SessionGroup>> = emptyMa
     fun removing(serverID: String, groupID: String): SessionGroups =
         withGroups(serverID, groups(serverID).filterNot { it.id == groupID })
 
+    /** Puts [groupID] at [index] (clamped) among this server's groups; the others keep their order. */
+    fun moving(serverID: String, groupID: String, index: Int): SessionGroups {
+        val groups = groups(serverID)
+        val from = groups.indexOfFirst { it.id == groupID }
+        if (from < 0) return this
+        val to = index.coerceIn(0, groups.size - 1)
+        if (to == from) return this
+        val next = groups.toMutableList()
+        next.add(to, next.removeAt(from))
+        return withGroups(serverID, next)
+    }
+
     /** Moves [sessionIDs] into [groupID], out of whichever group held them; null just takes them out. */
     fun assigning(serverID: String, sessionIDs: Collection<String>, groupID: String?): SessionGroups {
         if (sessionIDs.isEmpty()) return this

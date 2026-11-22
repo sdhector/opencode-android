@@ -239,6 +239,12 @@ class HomeFeatureTestsDrawer {
         val clock = BroadcastFrameClock()
         private var nanos = 0L
         fun scope(): CoroutineScope = CoroutineScope(test.coroutineContext + clock + Job())
+        fun frame() {
+            test.runCurrent()
+            nanos += 16_666_667
+            clock.sendFrame(nanos)
+            test.runCurrent()
+        }
         fun pump(pinDrag: DrawerPinDrag, limit: Int = 600) {
             test.runCurrent()
             var frames = 0
@@ -819,6 +825,210 @@ class HomeFeatureTestsDrawer {
         frames.pump(pinDrag)
         assertEquals(Action.DrawerRowDropped("p1", null), actions.last())
         assertTrue(host.groupDrops.isEmpty())
+        pinDrag.detach(host)
+    }
+
+    /**
+     * The list a group drag moves, laid out again whenever the store or the fold changes it:
+     * Pinned (p1), the groups in [order] (g1: m1, m2; g2 closed; g3: n1), New Group, Recents (r1).
+     * 56 a section header, 48 a group header or row.
+     */
+    private class GroupOrderList(val host: TestDrawerPinHost) {
+        val rows = mapOf("g1" to listOf("m1", "m2"), "g2" to emptyList(), "g3" to listOf("n1"))
+        var order = listOf("g1", "g2", "g3")
+        var folded: String? = null
+        val stride = 48f
+        val section = 56f
+
+        init {
+            layout()
+        }
+
+        fun layout() {
+            host.items.clear()
+            var y = 0f
+            fun place(key: DrawerPinDrag.ItemKey, height: Float) {
+                host.items += DrawerPinDragItem(key, y, height)
+                y += height
+            }
+            place(DrawerPinDrag.ItemKey.PinnedHeader, section)
+            place(DrawerPinDrag.ItemKey.Row("p1"), stride)
+            for (id in order) {
+                place(header(id), stride)
+                if (id != folded) rows.getValue(id).forEach { place(DrawerPinDrag.ItemKey.Row(it), stride) }
+            }
+            place(DrawerPinDrag.ItemKey.NewGroup, stride)
+            place(DrawerPinDrag.ItemKey.RecentsHeader, section)
+            place(DrawerPinDrag.ItemKey.Row("r1"), stride)
+        }
+
+        fun shownRows(): Map<String, List<String>> = order.associateWith { if (it == folded) emptyList() else rows.getValue(it) }
+        fun header(id: String) = DrawerPinDrag.ItemKey.GroupHeader(id)
+        fun minY(key: DrawerPinDrag.ItemKey) = host.items.first { it.key == key }.minY
+        fun shown(pinDrag: DrawerPinDrag, key: DrawerPinDrag.ItemKey) = minY(key) + pinDrag.translation(key)
+
+        /** The store took the drop: the group moves to [index], unfolded. */
+        fun drop(id: String, index: Int) {
+            order = (order - id).toMutableList().apply { add(index.coerceIn(0, size), id) }
+            folded = null
+            layout()
+        }
+    }
+
+    /** Frames until [until], laying the list out again after any frame that folds it, as the list view does. */
+    private fun Frames.pumpGroup(pinDrag: DrawerPinDrag, list: GroupOrderList, limit: Int = 600, until: () -> Boolean = { !pinDrag.groupDrag.isActive }) {
+        var frames = 0
+        while (!until() && frames < limit) {
+            frame()
+            if (list.folded != pinDrag.groupDrag.foldedID && pinDrag.groupDrag.foldedID != null) {
+                list.folded = pinDrag.groupDrag.foldedID
+                list.layout()
+                pinDrag.groupDrag.relayout()
+            }
+            frames++
+        }
+    }
+
+    private fun DrawerPinDrag.beginGroup(list: GroupOrderList, id: String, actions: MutableList<Action>, anchors: MutableList<Float> = ArrayList()) =
+        groupDrag.begin(
+            groupID = id,
+            order = list.order,
+            rows = { list.shownRows() },
+            fingerY = list.minY(list.header(id)) + 24,
+            reducedMotion = false,
+            onSlotChanged = { actions += Action.DrawerPinSlotChanged },
+            onDropReleased = { groupID, index -> actions += Action.DrawerGroupDropReleased(groupID, index) },
+            onDrop = { groupID, index ->
+                actions += Action.DrawerGroupDropped(groupID, index)
+                groupDrag.takeAnchor()?.let { anchors += it.top }
+                list.drop(groupID, index)
+                groupDrag.relayout()
+            },
+        )
+
+    @Test
+    fun aDraggedGroupFoldsItsRowsTheOthersMakeRoomAndItLandsInItsNewPlace() = homeTest { h ->
+        val frames = Frames(this)
+        val host = TestDrawerPinHost(frames.scope())
+        val pinDrag = DrawerPinDrag()
+        pinDrag.attach(host)
+        val list = GroupOrderList(host)
+        val drag = pinDrag.groupDrag
+        val actions = ArrayList<Action>()
+        val anchors = ArrayList<Float>()
+        val sectionTop = list.minY(list.header("g1"))
+        val recentsBefore = list.minY(DrawerPinDrag.ItemKey.RecentsHeader)
+
+        // Lifted, g3's row fades and folds; Recents starts where it showed and slides up.
+        pinDrag.beginGroup(list, "g3", actions, anchors)
+        assertEquals("g3", drag.draggingID)
+        assertNull("its rows fade before they fold", drag.foldedID)
+        frames.pumpGroup(pinDrag, list, until = { drag.foldedID != null })
+        assertEquals("g3", drag.foldedID)
+        assertFalse(host.items.any { it.key == DrawerPinDrag.ItemKey.Row("n1") })
+        assertEquals("nothing jumps as the rows fold", recentsBefore, list.shown(pinDrag, DrawerPinDrag.ItemKey.RecentsHeader), 1f)
+        frames.pumpGroup(pinDrag, list, limit = 60)
+        assertEquals(0f, pinDrag.translation(DrawerPinDrag.ItemKey.RecentsHeader), 0.5f)
+
+        // Over the top of g1, g3 takes the first slot: every group below makes room for its header.
+        val fingerY = sectionTop + 10
+        drag.update(fingerY)
+        frames.pumpGroup(pinDrag, list, limit = 60)
+        assertEquals(0, drag.slot)
+        assertEquals(Action.DrawerPinSlotChanged, actions.single())
+        assertEquals("the header rides the finger", fingerY - 24, list.shown(pinDrag, list.header("g3")), 0.5f)
+        for (key in listOf(list.header("g1"), DrawerPinDrag.ItemKey.Row("m1"), DrawerPinDrag.ItemKey.Row("m2"), list.header("g2"))) {
+            assertEquals("$key makes room", list.stride, pinDrag.translation(key), 0.5f)
+        }
+        for (key in listOf(DrawerPinDrag.ItemKey.PinnedHeader, DrawerPinDrag.ItemKey.Row("p1"), DrawerPinDrag.ItemKey.NewGroup, DrawerPinDrag.ItemKey.RecentsHeader)) {
+            assertEquals("$key stays", 0f, pinDrag.translation(key), 0.5f)
+        }
+
+        // Let go: it lands at the top of the groups, the store takes the order, and its row comes back.
+        drag.end(fingerX = 10f, fingerY = fingerY)
+        frames.pumpGroup(pinDrag, list, until = { actions.last() is Action.DrawerGroupDropped })
+        assertEquals(listOf(Action.DrawerPinSlotChanged, Action.DrawerGroupDropReleased("g3", 0), Action.DrawerGroupDropped("g3", 0)), actions)
+        assertEquals(listOf("g3", "g1", "g2"), list.order)
+        assertEquals("the list keeps the landed header where it showed", sectionTop, anchors.single(), 0.5f)
+        assertEquals(sectionTop, list.shown(pinDrag, list.header("g3")), 0.5f)
+        assertEquals("g1 starts where it showed", sectionTop + list.stride, list.shown(pinDrag, list.header("g1")), 0.5f)
+        assertEquals("the row comes back from under its header", sectionTop, list.shown(pinDrag, DrawerPinDrag.ItemKey.Row("n1")), 0.5f)
+        assertEquals(0f, pinDrag.alpha(DrawerPinDrag.ItemKey.Row("n1")), 0.01f)
+        frames.pumpGroup(pinDrag, list)
+        assertFalse(drag.isActive)
+        assertNull(drag.foldedID)
+        assertTrue("everything rests in its new place", host.items.all { pinDrag.translation(it.key) == 0f })
+        assertEquals(1f, pinDrag.alpha(DrawerPinDrag.ItemKey.Row("n1")), 0.01f)
+
+        // And back: dragged below g2, g3 is last again.
+        actions.clear()
+        pinDrag.beginGroup(list, "g3", actions)
+        frames.pumpGroup(pinDrag, list, until = { drag.foldedID != null })
+        val lastSlot = list.minY(DrawerPinDrag.ItemKey.NewGroup) - list.stride
+        drag.update(lastSlot + 24)
+        frames.pumpGroup(pinDrag, list, limit = 60)
+        assertEquals(2, drag.slot)
+        drag.end(fingerX = 10f, fingerY = lastSlot + 24)
+        frames.pumpGroup(pinDrag, list)
+        assertEquals(Action.DrawerGroupDropped("g3", 2), actions.last())
+        assertEquals(listOf("g1", "g2", "g3"), list.order)
+        assertTrue(host.items.all { pinDrag.translation(it.key) == 0f })
+        pinDrag.detach(host)
+    }
+
+    @Test
+    fun aGroupLetGoOutsideTheListOrTakenAwayGoesBackAndAnotherDragEndsIt() = homeTest { h ->
+        val frames = Frames(this)
+        val host = TestDrawerPinHost(frames.scope())
+        val pinDrag = DrawerPinDrag()
+        pinDrag.attach(host)
+        val list = GroupOrderList(host)
+        val drag = pinDrag.groupDrag
+        val actions = ArrayList<Action>()
+
+        pinDrag.beginGroup(list, "g1", actions)
+        frames.pumpGroup(pinDrag, list, until = { drag.foldedID != null })
+        drag.update(list.minY(DrawerPinDrag.ItemKey.NewGroup))
+        frames.pumpGroup(pinDrag, list, limit = 60)
+        assertEquals(2, drag.slot)
+        drag.end(fingerX = -500f, fingerY = list.minY(DrawerPinDrag.ItemKey.NewGroup))
+        frames.pumpGroup(pinDrag, list)
+        assertEquals("it goes back to its own slot", Action.DrawerGroupDropped("g1", 0), actions.last())
+        assertEquals(listOf("g1", "g2", "g3"), list.order)
+        assertTrue(host.items.all { pinDrag.translation(it.key) == 0f })
+
+        // A closed group has nothing to fold; a stream taken away puts it back.
+        pinDrag.beginGroup(list, "g2", actions)
+        assertEquals("g2", drag.foldedID)
+        drag.update(list.minY(list.header("g1")))
+        frames.pumpGroup(pinDrag, list, limit = 30)
+        drag.cancel()
+        frames.pumpGroup(pinDrag, list)
+        assertEquals(Action.DrawerGroupDropped("g2", 1), actions.last())
+        assertFalse(drag.isActive)
+
+        // A row lifted mid-drag ends the group's drag at once, leaving nothing folded.
+        pinDrag.beginGroup(list, "g3", actions)
+        frames.pumpGroup(pinDrag, list, limit = 5)
+        pinDrag.beginDrag(
+            sessionID = "r1",
+            isPinnedSection = false,
+            pinnedIDs = listOf("p1"),
+            recentIDs = listOf("r1"),
+            unpinnedRecentsIndex = 0,
+            showsShortcuts = false,
+            reducedMotion = false,
+            fingerY = list.minY(DrawerPinDrag.ItemKey.Row("r1")) + 24,
+            onZoneCrossed = {},
+            onSlotChanged = {},
+            onDrop = { _, _ -> },
+            onSetLifted = {},
+        )
+        assertFalse(drag.isActive)
+        assertNull(drag.foldedID)
+        assertTrue(drag.alphas.isEmpty())
+        pinDrag.cancelDrag()
+        frames.pump(pinDrag)
         pinDrag.detach(host)
     }
 

@@ -5,12 +5,16 @@ import ai.opencode.core.dependencies.DateClient
 import ai.opencode.core.dependencies.DependencyValues
 import ai.opencode.core.dependencies.ImmediateClock
 import ai.opencode.core.dependencies.UuidClient
+import ai.opencode.core.haptics.Haptic
+import ai.opencode.core.haptics.HapticsClient
 import ai.opencode.core.sharing.SharedKeys
 import ai.opencode.core.testing.TestIsolationRule
 import ai.opencode.feature.composer.PendingPrompt
 import ai.opencode.feature.composer.PromptOutbox
 import ai.opencode.feature.composer.unsentDrafts
 import ai.opencode.feature.drawer.HomeFeature.Action
+import ai.opencode.feature.drawer.HomeFeatureTestSupport.LockIsolated
+import ai.opencode.feature.drawer.HomeFeatureTestSupport.append
 import ai.opencode.feature.drawer.HomeFeatureTestSupport.detail
 import ai.opencode.feature.drawer.HomeFeatureTestSupport.homeTest
 import ai.opencode.feature.drawer.HomeFeatureTestSupport.receiveBounded
@@ -36,6 +40,7 @@ import ai.opencode.server.model.OpenCodeProject
 import ai.opencode.server.model.OpenCodeSession
 import ai.opencode.server.model.OpenCodeSessionFamily
 import java.time.Instant
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -63,13 +68,14 @@ class SessionGroupsTests {
     private fun group(id: String, vararg members: String, collapsed: Boolean = false) =
         SessionGroup(id = id, name = "Group $id", isCollapsed = collapsed, sessionIDs = members.toList())
 
-    private fun HomeFeature.State.model(liftedID: String? = null): DrawerListModel = DrawerListModel.build(
+    private fun HomeFeature.State.model(liftedID: String? = null, foldedGroupID: String? = null): DrawerListModel = DrawerListModel.build(
         state = this,
         inputs = DrawerListInputs(selectedSessionID = null, reducedMotion = true, increasedContrast = false),
         liftedID = liftedID,
         now = Instant.EPOCH,
         timestamp = { _, _ -> "" },
         project = { _, _ -> null },
+        foldedGroupID = foldedGroupID,
     )
 
     private fun DrawerListModel.sessionIDs(): List<String> = items.filterIsInstance<DrawerListItem.Session>().map { it.id }
@@ -128,6 +134,26 @@ class SessionGroupsTests {
         assertEquals(store, store.creating(serverID, "b", " "))
         assertEquals(store, store.renaming(serverID, "a", ""))
         assertEquals("Renamed", store.renaming(serverID, "a", " Renamed ").group(serverID, "a")?.name)
+    }
+
+    @Test
+    fun movingAGroupPutsItInItsNewPlaceAndKeepsTheRestInOrder() {
+        val store = SessionGroups()
+            .creating(serverID, "one", "One")
+            .creating(serverID, "two", "Two")
+            .creating(serverID, "three", "Three")
+            .assigning(serverID, listOf("s1"), "two")
+            .settingCollapsed(serverID, "two", true)
+        fun SessionGroups.ids() = groups(serverID).map { it.id }
+        val twoFirst = store.moving(serverID, "two", 0)
+        assertEquals(listOf("two", "one", "three"), twoFirst.ids())
+        assertEquals("a moved group keeps its name, members and collapse", store.group(serverID, "two"), twoFirst.group(serverID, "two"))
+        assertEquals("and it moves back", store, twoFirst.moving(serverID, "two", 1))
+        assertEquals("past the end is last", listOf("one", "three", "two"), store.moving(serverID, "two", 99).ids())
+        assertEquals("before the start is first", listOf("two", "one", "three"), store.moving(serverID, "two", -1).ids())
+        assertEquals("its own place changes nothing", store, store.moving(serverID, "one", 0))
+        assertEquals(store, store.moving(serverID, "missing", 0))
+        assertEquals("another server's order is its own", store, store.moving(otherServer.persistenceID, "two", 0))
     }
 
     // endregion
@@ -388,6 +414,116 @@ class SessionGroupsTests {
             listOf(DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("c")),
             withRecent.model(liftedID = "a").sections[DrawerListSection.recents],
         )
+    }
+
+    @Test
+    fun aLiftedGroupFoldsItsRowsAndOnlyAnUnsearchedListOffersMoves() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30), session("c", 20))
+        val state = h.state { HomeFeature.State(server, snapshot(sessions)) }
+            .copy(sessionGroups = groups(group("one", "a", "b"), group("two", "c")))
+
+        val folded = state.model(foldedGroupID = "one")
+        assertEquals(
+            listOf(DrawerListItem.GroupHeader("one"), DrawerListItem.GroupHeader("two"), DrawerListItem.Session("c"), DrawerListItem.NewGroup),
+            folded.sections[DrawerListSection.groups],
+        )
+        assertEquals("the lifted header keeps its count", 2, folded.groupHeaders["one"]!!.count)
+        assertFalse("it isn't closed", folded.groupHeaders["one"]!!.isCollapsed)
+        assertFalse("its rows don't fall into Recents", "a" in folded.sessionIDs())
+
+        val rest = state.model()
+        assertEquals(false to true, rest.groupHeaders["one"]!!.let { it.canMoveUp to it.canMoveDown })
+        assertEquals(true to false, rest.groupHeaders["two"]!!.let { it.canMoveUp to it.canMoveDown })
+        assertFalse(state.copy(search = "Title").model().groupHeaders.values.any { it.canMoveUp || it.canMoveDown })
+
+        assertEquals(
+            "the list follows the saved order, rows and all",
+            listOf(
+                DrawerListItem.GroupHeader("two"), DrawerListItem.Session("c"),
+                DrawerListItem.GroupHeader("one"), DrawerListItem.Session("a"), DrawerListItem.Session("b"), DrawerListItem.NewGroup,
+            ),
+            state.copy(sessionGroups = state.sessionGroups.moving(serverID, "two", 0)).model().sections[DrawerListSection.groups],
+        )
+    }
+
+    @Test
+    fun moveUpAndDownTradePlacesAndADropSnapsOnlyWhenTheOrderChanges() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sessionGroups, groups(group("one", "a"), group("two"), group("three")))
+        val played = LockIsolated<List<Haptic>>(emptyList())
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }) {
+            this[HapticsClient] = HapticsClient(play = { played.append(it) })
+        }
+        store.exhaustive = false
+        fun order() = store.state.serverGroups.map { it.id }
+
+        store.send(Action.MoveGroupUp("one"))
+        store.send(Action.MoveGroupDown("three"))
+        store.send(Action.MoveGroupUp("missing"))
+        assertEquals("the ends stay put", listOf("one", "two", "three"), order())
+        assertTrue(played.value.isEmpty())
+        store.send(Action.MoveGroupDown("one"))
+        assertEquals(listOf("two", "one", "three"), order())
+        store.send(Action.MoveGroupUp("one"))
+        assertEquals(listOf("one", "two", "three"), order())
+        assertEquals(listOf(Haptic.selection, Haptic.selection), played.value)
+
+        store.send(Action.DrawerGroupDropReleased("two", 1))
+        store.send(Action.DrawerGroupDropped("two", 1))
+        assertEquals("let go in its own slot: no snap, no change", listOf("one", "two", "three"), order())
+        assertEquals(2, played.value.size)
+        store.send(Action.DrawerGroupDropReleased("three", 0))
+        store.send(Action.DrawerGroupDropped("three", 0))
+        assertEquals(listOf("three", "one", "two"), order())
+        assertEquals(Haptic.snap, played.value.last())
+        store.send(Action.DrawerGroupDropped("missing", 0))
+        assertEquals(listOf("three", "one", "two"), order())
+        assertEquals("a session stays in its group", "one", store.state.groupID("a"))
+    }
+
+    @Test
+    fun theOrderIsSavedPerServerAndAFileFromBeforeReorderingReadsUnchanged() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30), session("c", 20), session("d", 10))
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        // session-groups.json as the build before reordering wrote it.
+        val saved = """{"byServer":{"$serverID":[""" +
+            """{"id":"one","name":"One","isCollapsed":true,"sessionIDs":["a"]},""" +
+            """{"id":"two","name":"Two","isCollapsed":false,"sessionIDs":["b"]}]}}"""
+        val json = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+            explicitNulls = false
+        }
+        val earlier = json.decodeFromString<SessionGroups>(saved)
+        assertEquals(
+            listOf(SessionGroup("one", "One", isCollapsed = true, sessionIDs = listOf("a")), SessionGroup("two", "Two", sessionIDs = listOf("b"))),
+            earlier.groups(serverID),
+        )
+        h.setShared(DrawerSharedKeys.sessionGroups, earlier)
+        h.setShared(SharedKeys.pinnedSessionKeys, listOf(base.sessionKey("c")))
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) })
+        store.exhaustive = false
+
+        store.send(Action.DrawerGroupDropped("two", 0))
+        val relaunched = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        assertEquals("a relaunch reads the new order", listOf("two", "one"), relaunched.serverGroups.map { it.id })
+        assertEquals("with names, members and collapse as they were", earlier.groups(serverID).toSet(), relaunched.serverGroups.toSet())
+        assertEquals(listOf("c"), relaunched.pinnedSessions.map { it.id })
+        assertEquals(h.shared(DrawerSharedKeys.sessionGroups), json.decodeFromString<SessionGroups>(json.encodeToString(h.shared(DrawerSharedKeys.sessionGroups))))
+        assertEquals(
+            "Pinned stays above the groups and Recents below them",
+            listOf(
+                DrawerListItem.Header(DrawerSectionHeaderKind.Pinned), DrawerListItem.Session("c"),
+                DrawerListItem.GroupHeader("two"), DrawerListItem.Session("b"), DrawerListItem.GroupHeader("one"), DrawerListItem.NewGroup,
+                DrawerListItem.Header(DrawerSectionHeaderKind.Recents), DrawerListItem.Session("d"),
+            ),
+            relaunched.model().items.filter {
+                it is DrawerListItem.Header || it is DrawerListItem.Session || it is DrawerListItem.GroupHeader || it == DrawerListItem.NewGroup
+            },
+        )
+        assertTrue("another server has none of it", h.state { HomeFeature.State(otherServer, snapshot(sessions)) }.serverGroups.isEmpty())
+
+        store.send(Action.DrawerGroupDropped("two", 1))
+        assertEquals("the move reverses to the file it started from", earlier, h.shared(DrawerSharedKeys.sessionGroups))
     }
 
     @Test

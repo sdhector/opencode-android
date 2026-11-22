@@ -51,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Rect
@@ -202,6 +203,7 @@ fun DrawerListView(
                     now = Instant.now(),
                     timestamp = { date, _ -> day.text(date) },
                     project = { session, _ -> projects.resolved(session) },
+                    foldedGroupID = pinDrag.groupDrag.foldedID,
                 )
             }
         }
@@ -346,6 +348,22 @@ fun DrawerListView(
         )
     }
 
+    fun beginGroupDrag(id: String, fingerY: Float) {
+        pinDrag.groupDrag.begin(
+            groupID = id,
+            order = model.groupHeaders.keys.toList(),
+            rows = { holder.model.groupHeaders.mapValues { it.value.sessionIDs } },
+            fingerY = fingerY,
+            reducedMotion = currentInputs.value.reducedMotion,
+            onSlotChanged = { store.send(HomeFeature.Action.DrawerPinSlotChanged) },
+            onDropReleased = { groupID, index -> store.send(HomeFeature.Action.DrawerGroupDropReleased(groupID, index)) },
+            onDrop = { groupID, index ->
+                store.send(HomeFeature.Action.DrawerGroupDropped(groupID, index))
+                host.flushNow()
+            },
+        )
+    }
+
     // Leaving Catch Up: TalkBack lands on the Catch Up row, or on the highlighted session.
     // Accessibility focus only, not input focus. Once, as the leave happens: a row not laid out by
     // then never takes it later.
@@ -396,14 +414,21 @@ fun DrawerListView(
         shownFirstKey[0] = firstKey
     }
 
+    // A dropped group's header stays where it landed as the list lays out the new order.
+    pinDrag.groupDrag.takeAnchor()?.let { anchor ->
+        val index = model.items.indexOf(DrawerListItem.GroupHeader(anchor.groupID))
+        if (index >= 0) listState.keepItem(index, top = anchor.top * density.density)
+    }
+
     // Pin, Unpin and Move Up/Down outside a drag (the menu, TalkBack) move the row to its new place
     // as the rows between make room, in one move; not on another server's Home or a changed search,
-    // and a drag lands its own.
+    // and a drag lands its own. A group's Move Up/Down moves its header and rows the same way.
     val shownPins = remember { arrayOfNulls<DrawerShownPins>(1) }
     val pins = DrawerShownPins(
         serverID = model.serverID,
         search = model.search,
         pinned = model.sections[DrawerListSection.pinned].orEmpty(),
+        groups = model.groupHeaders.keys.toList(),
     )
     shownPins[0]?.let { previous ->
         if (previous.movesPins(pins) && isDrawerVisible) pinDrag.pinMove.begin(model.reducedMotion)
@@ -426,6 +451,7 @@ fun DrawerListView(
                     layout(placeable.width, placeable.height) {
                         placeable.place(0, 0)
                         pinDrag.pinMove.apply()
+                        pinDrag.groupDrag.relayout()
                     }
                 }
                 .onGloballyPositioned { listCoordinates[0] = it }
@@ -437,7 +463,8 @@ fun DrawerListView(
                 // The dragged row draws above every other item, headers included, through its drag,
                 // landing and settle. The z-order has to sit on the item's root: the list orders
                 // its items, not their content.
-                val isDragged = item is DrawerListItem.Session && pinDrag.draggingID == item.id
+                val isDragged = item is DrawerListItem.Session && pinDrag.draggingID == item.id ||
+                    item is DrawerListItem.GroupHeader && pinDrag.groupDrag.draggingID == item.groupID
                 Box(Modifier.zIndex(if (isDragged) 1f else 0f)) {
                 when (item) {
                     DrawerListItem.CatchUp, DrawerListItem.WhatsNew -> DrawerListShortcutRow(
@@ -462,9 +489,16 @@ fun DrawerListView(
                                 newSession = { currentActions.newSessionInGroup(header.id) },
                                 rename = { currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
                                 remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
+                                moveUp = { store.send(HomeFeature.Action.MoveGroupUp(header.id)) },
+                                moveDown = { store.send(HomeFeature.Action.MoveGroupDown(header.id)) },
+                                isListMoving = { listState.isScrollInProgress },
+                                beginDrag = { y -> beginGroupDrag(header.id, y) },
+                                moveDrag = { y, time -> pinDrag.groupDrag.update(y, time) },
+                                endDrag = { x, y, cancelled -> if (cancelled) pinDrag.groupDrag.cancel() else pinDrag.groupDrag.end(x, y) },
+                                dismantled = { if (pinDrag.groupDrag.draggingID == header.id) pinDrag.groupDrag.cancelNow() },
                             )
                         }
-                        DrawerListGroupHeaderCell(header, groupActions, pinDrag)
+                        DrawerListGroupHeaderCell(header, groupActions, pinDrag, listCoordinates = { listCoordinates[0] })
                     }
                     DrawerListItem.NewGroup -> DrawerListNewGroupRow(pinDrag, onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) })
                     is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag)
@@ -589,6 +623,14 @@ private suspend fun springBack(reveal: DrawerListReveal, reducedMotion: Boolean,
     }
 }
 
+/** Lays [index] out at [top] px from the list's top at the next measure, read without observing the scroll. */
+private fun LazyListState.keepItem(index: Int, top: Float) = Snapshot.withoutReadObservation {
+    val info = layoutInfo
+    val first = info.visibleItemsInfo.firstOrNull { it.index == firstVisibleItemIndex }
+    val start = (first?.offset ?: 0) + firstVisibleItemScrollOffset
+    requestScrollToItem(index, start - info.viewportStartOffset - top.roundToInt())
+}
+
 /** Keeps unchanged rows' instances, so their cells skip recomposition. */
 private fun stabilized(previous: DrawerListModel, next: DrawerListModel): DrawerListModel {
     if (previous.rows.isEmpty()) return next
@@ -610,9 +652,15 @@ private fun contentType(item: DrawerListItem): Int = when (item) {
     DrawerListItem.Footer -> 7
 }
 
-/** What the list showed of its pins, to tell a Pin, Unpin or Move outside a drag. */
-internal data class DrawerShownPins(val serverID: String, val search: String, val pinned: List<DrawerListItem>) {
-    fun movesPins(next: DrawerShownPins): Boolean = serverID == next.serverID && search == next.search && pinned != next.pinned
+/** What the list showed of its pins and its groups' order, to tell a Pin, Unpin or Move outside a drag. */
+internal data class DrawerShownPins(
+    val serverID: String,
+    val search: String,
+    val pinned: List<DrawerListItem>,
+    val groups: List<String> = emptyList(),
+) {
+    fun movesPins(next: DrawerShownPins): Boolean = serverID == next.serverID && search == next.search &&
+        (pinned != next.pinned || groups != next.groups && groups.toSet() == next.groups.toSet())
 }
 
 /** A `LazyColumn` key back to the pin drag's item (headers and rows only). */

@@ -27,7 +27,7 @@ internal fun State.updatingSessionGroups(transform: (SessionGroups) -> SessionGr
     return if (live == sessionGroups) this else copy(sessionGroups = live)
 }
 
-/** This server's groups, in the order they were made. */
+/** This server's groups, in the order the drawer shows them. */
 val State.serverGroups: List<SessionGroup> get() = sessionGroups.groups(server.persistenceID)
 
 fun State.groupID(sessionID: String): String? = sessionGroups.groupID(server.persistenceID, sessionID)
@@ -79,8 +79,37 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
             return Reduced(movingSessions(unpinned, listOf(action.sessionID), action.groupID))
         }
 
+        is Action.MoveGroupUp -> return Reduced(movingGroup(state, action.groupID) { it - 1 })
+
+        is Action.MoveGroupDown -> return Reduced(movingGroup(state, action.groupID) { it + 1 })
+
+        is Action.DrawerGroupDropReleased -> {
+            if (willMoveGroup(state, action.groupID, action.index)) haptics.play(Haptic.snap)
+            return Reduced(state)
+        }
+
+        is Action.DrawerGroupDropped -> {
+            if (!willMoveGroup(state, action.groupID, action.index)) return Reduced(state)
+            return Reduced(state.updatingSessionGroups { it.moving(serverID, action.groupID, action.index) })
+        }
+
         else -> return Reduced(state)
     }
+}
+
+private fun willMoveGroup(state: State, groupID: String, index: Int): Boolean {
+    val groups = state.serverGroups
+    val from = groups.indexOfFirst { it.id == groupID }
+    return from >= 0 && index.coerceIn(0, groups.size - 1) != from
+}
+
+private fun movingGroup(state: State, groupID: String, index: (Int) -> Int): State {
+    val from = state.serverGroups.indexOfFirst { it.id == groupID }
+    if (from < 0) return state
+    val to = index(from)
+    if (to !in state.serverGroups.indices) return state
+    dependency(HapticsClient).play(Haptic.selection)
+    return state.updatingSessionGroups { it.moving(state.server.persistenceID, groupID, to) }
 }
 
 private fun movingSessions(state: State, ids: List<String>, groupID: String?): State {

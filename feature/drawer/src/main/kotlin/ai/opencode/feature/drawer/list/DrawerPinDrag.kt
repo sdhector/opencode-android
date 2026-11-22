@@ -72,6 +72,25 @@ interface DrawerPinDragHost {
     val frameDurationSeconds: Double
 }
 
+/**
+ * How far a finger at [fingerY] scrolls the list this frame ([DrawerPinDrag.autoScroll]), dp; zero
+ * outside the edge bands. Never so far that [dragged]'s slot would leave the list.
+ */
+internal fun DrawerPinDragHost.edgeScrollStep(fingerY: Float, dragged: DrawerPinDragItem, dt: Double): Float {
+    if (dt <= 0) return 0f
+    val top = viewportTop
+    val bottom = min(footerTop, height)
+    val band = max(DrawerTunables.pinEdgeBand.value, 1f)
+    val depth = when {
+        fingerY < top + band -> -min((top + band - fingerY) / band, 1f)
+        fingerY > bottom - band -> min((fingerY - (bottom - band)) / band, 1f)
+        else -> return 0f
+    }
+    val speed = DrawerTunables.pinEdgeSpeed.value * depth * abs(depth)
+    val step = (speed * dt).toFloat()
+    return if (step > 0) min(step, max(dragged.minY, 0f)) else max(step, -max(height - dragged.maxY, 0f))
+}
+
 /** One visible header or row: its key, untransformed top and height, in dp. */
 data class DrawerPinDragItem(val key: DrawerPinDrag.ItemKey, val minY: Float, val height: Float) {
     val maxY: Float get() = minY + height
@@ -163,8 +182,14 @@ class DrawerPinDrag {
     /** Pin, Unpin and Move outside a drag: see [DrawerPinMove]. */
     internal val pinMove = DrawerPinMove(this)
 
-    /** A row's opacity while a Pin or Unpin cross-fades it in under Reduce Motion. */
-    fun alpha(key: ItemKey): Float = pinMove.alphas[key] ?: 1f
+    /** A group header dragged to reorder the groups: see [DrawerGroupDrag]. */
+    val groupDrag = DrawerGroupDrag(this)
+
+    /**
+     * A row's opacity while a Pin or Unpin cross-fades it in under Reduce Motion, or while a dragged
+     * group's rows fold under its header and come back.
+     */
+    fun alpha(key: ItemKey): Float = pinMove.alphas[key] ?: groupDrag.alphas[key] ?: 1f
 
     // ---- Drag state ----
 
@@ -610,6 +635,7 @@ class DrawerPinDrag {
     fun resetAllCellsAndCleanup() {
         dropTarget = null
         pinMove.cancel()
+        groupDrag.cancelNow()
         landingFallback?.cancel()
         landingFallback = null
         frameJob?.cancel()
@@ -735,20 +761,9 @@ class DrawerPinDrag {
     internal fun autoScroll(dt: Double): Boolean {
         val host = host ?: return false
         val draggedID = activeSessionID ?: return false
-        if (hasCommittedDrop || isLandingPlatter || dt <= 0) return false
-        val top = host.viewportTop
-        val bottom = min(host.footerTop, host.height)
-        val band = max(DrawerTunables.pinEdgeBand.value, 1f)
-        val y = lastFingerY
-        val depth = when {
-            y < top + band -> -min((top + band - y) / band, 1f)
-            y > bottom - band -> min((y - (bottom - band)) / band, 1f)
-            else -> return false
-        }
+        if (hasCommittedDrop || isLandingPlatter) return false
         val dragged = visibleItem(ItemKey.Row(draggedID)) ?: return false
-        val speed = DrawerTunables.pinEdgeSpeed.value * depth * abs(depth)
-        val step = (speed * dt).toFloat()
-        val delta = if (step > 0) min(step, max(dragged.minY, 0f)) else max(step, -max(host.height - dragged.maxY, 0f))
+        val delta = host.edgeScrollStep(lastFingerY, dragged, dt)
         if (abs(delta) < 0.01f) return false
         host.scrollBy(delta)
         val moved = (visibleItem(dragged.key)?.minY ?: return false) - dragged.minY

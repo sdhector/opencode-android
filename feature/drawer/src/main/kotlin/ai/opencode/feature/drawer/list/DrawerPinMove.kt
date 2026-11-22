@@ -14,10 +14,10 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 /**
- * Pin, Unpin and Move Up/Down outside a drag (the menu, TalkBack) move the row to its new place
- * while the rows between make room, on `MotionRole.Layout` (`Reduced` cross-fades). [begin] notes
- * where each visible row shows before the store's change; [apply] starts each there and springs its
- * offset to zero. A drag lands its own moves.
+ * Pin, Unpin and Move Up/Down (a pin's or a group's) outside a drag (the menu, TalkBack) move the
+ * row to its new place while the rows between make room, on `MotionRole.Layout` (`Reduced`
+ * cross-fades). [begin] notes where each visible row shows before the store's change; [apply]
+ * starts each there and springs its offset to zero. A drag lands its own moves.
  */
 internal class DrawerPinMove(private val pinDrag: DrawerPinDrag) {
     private var from: Map<ItemKey, Float>? = null
@@ -35,7 +35,7 @@ internal class DrawerPinMove(private val pinDrag: DrawerPinDrag) {
 
     /** The store is about to move pinned rows outside a drag: remember where the visible rows show. */
     fun begin(reducedMotion: Boolean) {
-        if (pinDrag.activeSessionID != null || pinDrag.isDisplayLinkRunning) return
+        if (pinDrag.activeSessionID != null || pinDrag.isDisplayLinkRunning || pinDrag.groupDrag.isActive) return
         val host = pinDrag.host ?: return
         this.reducedMotion = reducedMotion
         // Called from composition: the list's layout isn't something it should recompose on.
