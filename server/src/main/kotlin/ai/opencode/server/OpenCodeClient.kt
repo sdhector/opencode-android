@@ -50,7 +50,10 @@ import ai.opencode.server.live.requestRunMessages
 import ai.opencode.server.live.requestRunReply
 import ai.opencode.server.live.requestRunningShells
 import ai.opencode.server.live.requestSearchSessions
+import ai.opencode.server.live.requestSessionGroups
+import ai.opencode.server.live.requestSessionGroupsCapabilities
 import ai.opencode.server.live.requestSessionPage
+import ai.opencode.server.live.requestWriteSessionGroups
 import ai.opencode.server.live.requestSendCommand
 import ai.opencode.server.live.requestSendDeliveredPrompt
 import ai.opencode.server.live.requestSendPrompt
@@ -102,6 +105,9 @@ import ai.opencode.server.model.OpenCodeSession
 import ai.opencode.server.model.OpenCodeSessionPage
 import ai.opencode.server.model.OpenCodeSessionPageRequest
 import ai.opencode.server.model.OpenCodeSessionFamily
+import ai.opencode.server.model.OpenCodeSessionGroupsCapabilities
+import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
+import ai.opencode.server.model.OpenCodeSessionGroupsWrite
 import ai.opencode.server.model.OpenCodeShell
 import ai.opencode.server.model.OpenCodeJob
 import ai.opencode.server.model.OpenCodeShellOutputPage
@@ -184,6 +190,17 @@ data class OpenCodeClient(
     val getSession: suspend (server: OpenCodeServer, sessionID: String) -> OpenCodeSession,
     /** Whether the server loaded the notify plugin (`GET /api/plugin`). */
     val notifyPluginStatus: suspend (server: OpenCodeServer) -> OpenCodeNotifyPluginStatus,
+    /** The `session-groups` plugin's `capabilities`; an older plugin answers `rpc.method_not_found`. */
+    val sessionGroupsCapabilities: suspend (server: OpenCodeServer) -> OpenCodeSessionGroupsCapabilities,
+    /** The shared session groups' snapshot (`list`). */
+    val sessionGroups: suspend (server: OpenCodeServer) -> OpenCodeSessionGroupsSnapshot,
+    /** One write to the shared session groups, answered with the snapshot after it. */
+    val writeSessionGroups: suspend (
+        server: OpenCodeServer,
+        write: OpenCodeSessionGroupsWrite,
+        expectedRevision: Long,
+        operationID: String?,
+    ) -> OpenCodeSessionGroupsSnapshot,
     /** Location-scoped: pass only the open session's directory. */
     val runningShells: suspend (server: OpenCodeServer, directory: String) -> List<OpenCodeShell>,
     /** The session's running background jobs, its descendants' included (`GET /api/experimental/job`). */
@@ -313,6 +330,9 @@ data class OpenCodeClient(
             cancelForm = ::requestCancelForm,
             getSession = ::requestGetSession,
             notifyPluginStatus = ::requestNotifyPluginStatus,
+            sessionGroupsCapabilities = ::requestSessionGroupsCapabilities,
+            sessionGroups = ::requestSessionGroups,
+            writeSessionGroups = ::requestWriteSessionGroups,
             runningShells = ::requestRunningShells,
             runningJobs = ::requestRunningJobs,
             cancelJob = ::requestCancelJob,
@@ -394,6 +414,9 @@ data class OpenCodeClient(
                     cancelForm = { _, _, _, _ -> unimplemented("cancelForm") },
                     getSession = { _, _ -> unimplemented("getSession") },
                     notifyPluginStatus = { unimplemented("notifyPluginStatus") },
+                    sessionGroupsCapabilities = { unimplemented("sessionGroupsCapabilities") },
+                    sessionGroups = { unimplemented("sessionGroups") },
+                    writeSessionGroups = { _, _, _, _ -> unimplemented("writeSessionGroups") },
                     runningShells = { _, _ -> unimplemented("runningShells") },
                     runningJobs = { _, _ -> emptyList() },
                     cancelJob = { _, _ -> },

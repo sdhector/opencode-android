@@ -38,7 +38,10 @@ internal fun HomeFeature.core(state: State, action: Action): Reduced<State, Acti
         else -> false
     }
     if (persists) s = s.persistingSnapshot(dependency(HomeSnapshotDate).now())
-    return Reduced(s, reduced.effect)
+    val lifecycle = sharedGroupsLifecycle(s, action)
+    val drained = drainingGroupWrites(lifecycle.state)
+    s = drained.state
+    return Reduced(s, Effect.merge(reduced.effect, lifecycle.effect, drained.effect, clearingGroupsError(state, s)))
 }
 
 private fun HomeFeature.coreRoute(state: State, action: Action): Reduced<State, Action> = when (action) {
@@ -198,6 +201,21 @@ private fun HomeFeature.coreRoute(state: State, action: Action): Reduced<State, 
     -> reduceGroups(state, action)
 
     is Action.DrawerRowDroppedInGroup -> reduceGroups(state.adoptingSearchResultFor(action), action)
+
+    Action.GroupSharingDiscoveryRequested,
+    Action.ShareGroupsTapped,
+    is Action.ShareGroupsConfirmed,
+    Action.ImportLocalGroupsTapped,
+    Action.ImportLocalGroupsConfirmed,
+    Action.StopSharingGroupsTapped,
+    Action.StopSharingGroupsConfirmed,
+    Action.GroupSharingPromptDismissed,
+    is Action.SharedGroupsRead,
+    is Action.SharedGroupsWritten,
+    is Action.SharedGroupsImportPrepared,
+    Action.SharedGroupsPollTick,
+    Action.ClearGroupsError,
+    -> reduceSharedGroups(state, action)
 
     is Action.InAppNoticeExpired ->
         if (state.inAppNotice?.id != action.id) Reduced(state) else Reduced(state.copy(inAppNotice = null))

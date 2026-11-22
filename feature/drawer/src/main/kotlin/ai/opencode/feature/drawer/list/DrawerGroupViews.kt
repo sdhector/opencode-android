@@ -11,10 +11,13 @@ import ai.opencode.core.ui.OpenCodeTextField
 import ai.opencode.core.ui.OpenCodeTheme
 import ai.opencode.core.ui.SFSymbol
 import ai.opencode.core.ui.openCodeTapTarget
+import ai.opencode.feature.drawer.GroupSharingStatus
 import ai.opencode.feature.drawer.HomeFeature
 import ai.opencode.feature.drawer.R
+import ai.opencode.feature.drawer.groups.GroupSharingPrompt
 import ai.opencode.feature.drawer.groups.SessionGroups
 import ai.opencode.feature.drawer.serverGroups
+import ai.opencode.feature.drawer.sharedGroups
 import ai.opencode.feature.drawer.style.DrawerDropSlotRow
 import ai.opencode.feature.drawer.style.DrawerMetrics
 import ai.opencode.feature.drawer.style.DrawerTunables
@@ -62,6 +65,7 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -69,8 +73,8 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 
 /*
- * Local Session Groups' list rows and dialogs. A group is a phone-side bundle: every action here
- * lands in Home as a plain group action and none reaches the server.
+ * Session Groups' list rows and dialogs. Every action here lands in Home as a plain group action;
+ * Home decides whether it stays on the phone or goes to a shared server.
  */
 
 /** What the group dialogs are asking about; the drawer shows one at a time. */
@@ -226,7 +230,7 @@ fun DrawerListGroupHeaderCell(
             style = OpenCodeIconButtonStyle.Standard,
             modifier = Modifier.testTag("drawer-group-new-session-${header.id}"),
         )
-        Box {
+        if (reorderable || header.canRename || header.canRemove) Box {
             OpenCodeIconButton(
                 SFSymbol.Ellipsis,
                 contentDescription = stringResource(R.string.drawer_selection_more_options_description),
@@ -248,27 +252,45 @@ fun DrawerListGroupHeaderCell(
                         onClick = { menuOpen = false; actions.moveDown() },
                     )
                 }
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.drawer_group_rename)) },
-                    leadingIcon = { OpenCodeIcon(SFSymbol.Pencil, contentDescription = null) },
-                    onClick = { menuOpen = false; actions.rename() },
-                )
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.drawer_group_remove), color = colors.destructive) },
-                    leadingIcon = { OpenCodeIcon(SFSymbol.Trash, contentDescription = null, tint = colors.destructive) },
-                    onClick = { menuOpen = false; actions.remove() },
-                )
+                if (header.canRename) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.drawer_group_rename)) },
+                        leadingIcon = { OpenCodeIcon(SFSymbol.Pencil, contentDescription = null) },
+                        onClick = { menuOpen = false; actions.rename() },
+                    )
+                }
+                if (header.canRemove) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.drawer_group_remove), color = colors.destructive) },
+                        leadingIcon = { OpenCodeIcon(SFSymbol.Trash, contentDescription = null, tint = colors.destructive) },
+                        onClick = { menuOpen = false; actions.remove() },
+                    )
+                }
             }
         }
     }
 }
 
-/** The row that ends the group section: New Group. */
+/** The New Group row's sharing menu, as closures. */
+class DrawerGroupSharingActions(val share: () -> Unit, val import: () -> Unit, val stop: () -> Unit)
+
+/**
+ * The row that ends the group section: New Group. On a server that can share groups it ends in a
+ * sharing button whose menu turns sharing on or off and imports this phone's groups.
+ */
 @Composable
-fun DrawerListNewGroupRow(pinDrag: DrawerPinDrag, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val colors = OpenCodeTheme.colors
+fun DrawerListNewGroupRow(
+    pinDrag: DrawerPinDrag,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    sharing: GroupSharingStatus? = null,
+    sharingActions: DrawerGroupSharingActions? = null,
+) {
+    if (sharing == null || sharingActions == null) {
+        NewGroupRow(pinDrag, onClick, modifier)
+        return
+    }
     val density = LocalDensity.current
-    val label = stringResource(R.string.drawer_group_new)
     Row(
         modifier
             .fillMaxWidth()
@@ -276,7 +298,82 @@ fun DrawerListNewGroupRow(pinDrag: DrawerPinDrag, onClick: () -> Unit, modifier:
                 translationY = pinDrag.translation(DrawerPinDrag.ItemKey.NewGroup) * density.density
                 alpha = pinDrag.alpha(DrawerPinDrag.ItemKey.NewGroup)
             }
-            .padding(horizontal = DrawerMetrics.rowEdge)
+            .padding(end = DrawerMetrics.rowEdge),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NewGroupRow(pinDrag = null, onClick = onClick, modifier = Modifier.weight(1f))
+        GroupSharingButton(sharing, sharingActions)
+    }
+}
+
+@Composable
+private fun GroupSharingButton(sharing: GroupSharingStatus, actions: DrawerGroupSharingActions) {
+    val colors = OpenCodeTheme.colors
+    var menuOpen by remember { mutableStateOf(false) }
+    val state = when {
+        sharing.isOffline -> stringResource(R.string.drawer_groups_offline_state)
+        sharing.isShared -> stringResource(R.string.drawer_groups_shared_state)
+        else -> null
+    }
+    val label = stringResource(R.string.drawer_groups_sharing_options)
+    Box {
+        OpenCodeIconButton(
+            when {
+                sharing.isOffline -> SFSymbol.NetworkSlash
+                sharing.isShared -> SFSymbol.LaptopcomputerAndIphone
+                else -> SFSymbol.Ellipsis
+            },
+            contentDescription = label,
+            onClick = { menuOpen = true },
+            style = OpenCodeIconButtonStyle.Standard,
+            modifier = Modifier
+                .testTag("drawer-group-sharing")
+                .then(if (state == null) Modifier else Modifier.semantics { stateDescription = state }),
+        )
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            if (state != null) {
+                DropdownMenuItem(text = { Text(state, color = colors.secondaryText) }, onClick = {}, enabled = false)
+            }
+            if (!sharing.isShared) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.drawer_groups_share)) },
+                    leadingIcon = { OpenCodeIcon(SFSymbol.LaptopcomputerAndIphone, contentDescription = null) },
+                    onClick = { menuOpen = false; actions.share() },
+                )
+            }
+            if (sharing.canImport) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.drawer_groups_import)) },
+                    leadingIcon = { OpenCodeIcon(SFSymbol.SquareAndArrowUp, contentDescription = null) },
+                    onClick = { menuOpen = false; actions.import() },
+                )
+            }
+            if (sharing.isShared) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.drawer_groups_stop_sharing)) },
+                    leadingIcon = { OpenCodeIcon(SFSymbol.XmarkCircle, contentDescription = null) },
+                    onClick = { menuOpen = false; actions.stop() },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewGroupRow(pinDrag: DrawerPinDrag?, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = OpenCodeTheme.colors
+    val density = LocalDensity.current
+    val label = stringResource(R.string.drawer_group_new)
+    Row(
+        modifier
+            .fillMaxWidth()
+            .then(
+                if (pinDrag == null) Modifier else Modifier.graphicsLayer {
+                    translationY = pinDrag.translation(DrawerPinDrag.ItemKey.NewGroup) * density.density
+                    alpha = pinDrag.alpha(DrawerPinDrag.ItemKey.NewGroup)
+                },
+            )
+            .padding(start = DrawerMetrics.rowEdge, end = if (pinDrag == null) 0.dp else DrawerMetrics.rowEdge)
             .clip(RoundedCornerShape(DrawerMetrics.rowCornerRadius))
             .clickable(role = Role.Button, onClick = onClick)
             .openCodeTapTarget()
@@ -339,6 +436,8 @@ fun DrawerRecentsDropSlot(pinDrag: DrawerPinDrag, modifier: Modifier = Modifier)
 /** Shows the dialog [editor] is asking for: name a group, confirm its removal, or choose a group for sessions. */
 @Composable
 internal fun DrawerGroupDialogs(store: StoreOf<HomeFeature.State, HomeFeature.Action>, editor: DrawerGroupEditor) {
+    GroupSharingDialogs(store)
+    val shared by store.observe { it.sharedGroups != null }
     val request = editor.request ?: return
     val dismiss = { editor.request = null }
     when (request) {
@@ -365,7 +464,7 @@ internal fun DrawerGroupDialogs(store: StoreOf<HomeFeature.State, HomeFeature.Ac
         is DrawerGroupEditor.Request.Remove -> OpenCodeAlertDialog(
             onDismissRequest = dismiss,
             title = { Text(stringResource(R.string.drawer_group_remove_title, request.name)) },
-            text = { Text(stringResource(R.string.drawer_group_remove_message)) },
+            text = { Text(stringResource(if (shared) R.string.drawer_group_remove_shared_message else R.string.drawer_group_remove_message)) },
             confirmButton = {
                 TextButton(onClick = {
                     store.send(HomeFeature.Action.RemoveGroup(request.groupID))
@@ -378,6 +477,77 @@ internal fun DrawerGroupDialogs(store: StoreOf<HomeFeature.State, HomeFeature.Ac
             modifier = Modifier.testTag("drawer-group-remove-confirmation"),
         )
         is DrawerGroupEditor.Request.Move -> GroupPickerDialog(store, request.sessionIDs, editor, onDismiss = dismiss)
+    }
+}
+
+/** The sharing dialog Home is asking: turn sharing on (and maybe import), import, or stop. */
+@Composable
+private fun GroupSharingDialogs(store: StoreOf<HomeFeature.State, HomeFeature.Action>) {
+    val prompt by store.observe { it.groupSync.prompt }
+    val dismiss = { store.send(HomeFeature.Action.GroupSharingPromptDismissed) }
+    val cancel = @Composable { TextButton(onClick = dismiss) { Text(stringResource(CoreR.string.common_cancel)) } }
+    when (val current = prompt) {
+        null, GroupSharingPrompt.Checking -> Unit
+        is GroupSharingPrompt.Share -> OpenCodeAlertDialog(
+            onDismissRequest = dismiss,
+            title = { Text(stringResource(R.string.drawer_groups_share_title)) },
+            text = {
+                val local = current.localGroupCount
+                Text(
+                    when {
+                        current.canImport -> pluralStringResource(R.plurals.drawer_groups_share_import_message, local, local)
+                        local > 0 -> pluralStringResource(R.plurals.drawer_groups_share_replace_message, local, local)
+                        else -> stringResource(R.string.drawer_groups_share_message)
+                    },
+                )
+            },
+            confirmButton = {
+                if (current.canImport) {
+                    TextButton(onClick = { store.send(HomeFeature.Action.ShareGroupsConfirmed(importsLocal = true)) }) {
+                        Text(stringResource(R.string.drawer_groups_share_and_import))
+                    }
+                } else {
+                    TextButton(onClick = { store.send(HomeFeature.Action.ShareGroupsConfirmed(importsLocal = false)) }) {
+                        Text(stringResource(R.string.drawer_groups_share_confirm))
+                    }
+                }
+            },
+            dismissButton = {
+                Row {
+                    cancel()
+                    if (current.canImport) {
+                        TextButton(onClick = { store.send(HomeFeature.Action.ShareGroupsConfirmed(importsLocal = false)) }) {
+                            Text(stringResource(R.string.drawer_groups_share_only))
+                        }
+                    }
+                }
+            },
+            modifier = Modifier.testTag("drawer-groups-share-confirmation"),
+        )
+        is GroupSharingPrompt.Import -> OpenCodeAlertDialog(
+            onDismissRequest = dismiss,
+            title = { Text(pluralStringResource(R.plurals.drawer_groups_import_title, current.localGroupCount, current.localGroupCount)) },
+            text = { Text(stringResource(R.string.drawer_groups_import_message)) },
+            confirmButton = {
+                TextButton(onClick = { store.send(HomeFeature.Action.ImportLocalGroupsConfirmed) }) {
+                    Text(stringResource(R.string.drawer_groups_import_confirm))
+                }
+            },
+            dismissButton = cancel,
+            modifier = Modifier.testTag("drawer-groups-import-confirmation"),
+        )
+        GroupSharingPrompt.Stop -> OpenCodeAlertDialog(
+            onDismissRequest = dismiss,
+            title = { Text(stringResource(R.string.drawer_groups_stop_title)) },
+            text = { Text(stringResource(R.string.drawer_groups_stop_message)) },
+            confirmButton = {
+                TextButton(onClick = { store.send(HomeFeature.Action.StopSharingGroupsConfirmed) }) {
+                    Text(stringResource(R.string.drawer_groups_stop_confirm))
+                }
+            },
+            dismissButton = cancel,
+            modifier = Modifier.testTag("drawer-groups-stop-confirmation"),
+        )
     }
 }
 

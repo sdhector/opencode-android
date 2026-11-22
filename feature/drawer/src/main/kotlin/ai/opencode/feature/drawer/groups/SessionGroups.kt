@@ -4,7 +4,7 @@ import ai.opencode.core.sharing.FileDirectory
 import ai.opencode.core.sharing.SharedKey
 import kotlinx.serialization.Serializable
 
-/** A named, collapsible bundle of root sessions on one server. Phone-local: the server never hears of it. */
+/** A named, collapsible bundle of root sessions on one server: phone-local, or a shared server's (`SharedGroupsServer`). */
 @Serializable
 data class SessionGroup(
     val id: String,
@@ -124,4 +124,7 @@ data class DraftGroupTarget(
 object DrawerSharedKeys {
     /** Phone-local session groups, server-scoped like pins. */
     val sessionGroups = SharedKey.fileStorage(FileDirectory.Documents, "session-groups.json", SessionGroups())
+
+    /** Servers whose groups are shared, with each one's last snapshot and the phone's collapse state. */
+    val sharedSessionGroups = SharedKey.fileStorage(FileDirectory.Documents, "shared-session-groups.json", SharedSessionGroups())
 }

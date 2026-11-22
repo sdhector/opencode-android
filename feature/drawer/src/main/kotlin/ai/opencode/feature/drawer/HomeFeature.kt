@@ -14,7 +14,10 @@ import ai.opencode.core.store.Reducer
 import ai.opencode.feature.drawer.catchup.CatchUpFeature
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
+import ai.opencode.feature.drawer.groups.GroupSync
+import ai.opencode.feature.drawer.groups.SessionGroup
 import ai.opencode.feature.drawer.groups.SessionGroups
+import ai.opencode.feature.drawer.groups.SharedSessionGroups
 import ai.opencode.devtools.traces.TraceUploadsFeature
 import ai.opencode.feature.session.InAppNotice
 import ai.opencode.feature.composer.ComposerPersistence
@@ -52,6 +55,7 @@ import ai.opencode.server.model.OpenCodeModelRef
 import ai.opencode.server.model.OpenCodeNotifyPluginStatus
 import ai.opencode.server.model.OpenCodeProject
 import ai.opencode.server.model.OpenCodeSession
+import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
 import ai.opencode.server.model.OpenCodeTranscriptItem
 import ai.opencode.server.model.SessionActivity
 import ai.opencode.server.model.SessionTitle
@@ -154,6 +158,12 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         val sessionGroups: SessionGroups = SessionGroups(),
         /** The group the open draft's first send puts its session in (Local Session Groups). */
         val draftGroup: DraftGroupTarget? = null,
+        /** Mirror of `DrawerSharedKeys.sharedSessionGroups`. */
+        val sharedSessionGroups: SharedSessionGroups = SharedSessionGroups(),
+        /** This server's shared groups this run: discovery, queued writes, the sharing dialog. */
+        val groupSync: GroupSync = GroupSync(),
+        /** A shared groups change the server refused or couldn't be reached for, shown above New Session for a few seconds. */
+        val groupsError: DrawerFailure? = null,
         /** Mirror of `SharedKeys.sidebarShown`: beside a wide window's sidebar, whether it shows. */
         val isSidebarShown: Boolean = true,
         /**
@@ -373,7 +383,11 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
 
         val server: OpenCodeServer get() = connection.server
 
-        fun withServer(server: OpenCodeServer): State = copy(connection = connection.copy(server = server))
+        fun withServer(server: OpenCodeServer): State {
+            val moved = copy(connection = connection.copy(server = server))
+            // Shared groups' discovery and queue belong to one server.
+            return if (server.persistenceID == this.server.persistenceID) moved else moved.copy(groupSync = GroupSync())
+        }
 
         /**
          * Like the TUI and the desktop app, a root is busy while it or anything in its family runs:
@@ -588,6 +602,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
                     mutedSessionKeys = shared(SharedKeys.mutedSessionKeys).value,
                     hiddenSessionKeys = shared(SharedKeys.hiddenSessionKeys).value,
                     sessionGroups = shared(DrawerSharedKeys.sessionGroups).value,
+                    sharedSessionGroups = shared(DrawerSharedKeys.sharedSessionGroups).value,
                     isSidebarShown = shared(SharedKeys.sidebarShown).value,
                     showsWhatsNewButton = WhatsNewFeature.State().showsButton,
                     initializedInboxServerIDs = shared(SharedKeys.initializedInboxServerIDs).value,
@@ -714,7 +729,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data class ToggleGroupCollapsed(val groupID: String) : Action
         /** Removes the group only; its sessions stay where they are on the server and in the list. */
         data class RemoveGroup(val groupID: String) : Action
-        /** Puts [sessionIDs] in [groupID], or out of every group when it's null. Phone-local: nothing is sent. */
+        /** Puts [sessionIDs] in [groupID], or out of every group when it's null. Only a shared server hears of it. */
         data class MoveSessionsToGroup(val sessionIDs: List<String>, val groupID: String?) : Action
         /** A dragged row dropped on a group, or on Recents when [groupID] is null: it shows there, unpinned. */
         data class DrawerRowDroppedInGroup(val sessionID: String, val groupID: String?) : Action
@@ -725,6 +740,30 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data class DrawerGroupDropReleased(val groupID: String, val index: Int) : Action
         /** A dragged group header landed: the group takes [index] among this server's groups. */
         data class DrawerGroupDropped(val groupID: String, val index: Int) : Action
+        /** The drawer is showing: learn once whether this server can share its groups. */
+        data object GroupSharingDiscoveryRequested : Action
+        /** The sharing menu's Share Groups: read the server's groups, then ask. */
+        data object ShareGroupsTapped : Action
+        /** The sharing dialog's answer; [importsLocal] copies this phone's groups to a fresh store first. */
+        data class ShareGroupsConfirmed(val importsLocal: Boolean) : Action
+        data object ImportLocalGroupsTapped : Action
+        data object ImportLocalGroupsConfirmed : Action
+        data object StopSharingGroupsTapped : Action
+        /** The drawer returns to this phone's groups; the server keeps its own. */
+        data object StopSharingGroupsConfirmed : Action
+        data object GroupSharingPromptDismissed : Action
+        data class SharedGroupsRead(val serverID: String, val read: SharedGroupsReadResult) : Action
+        /** A write's answer: the snapshot after it, or why it failed. */
+        data class SharedGroupsWritten(
+            val serverID: String,
+            val operationID: String,
+            val snapshot: OpenCodeSessionGroupsSnapshot? = null,
+            val error: OpenCodeClientError? = null,
+        ) : Action
+        /** The import's payload, with sessions the server no longer has left out. */
+        data class SharedGroupsImportPrepared(val serverID: String, val groups: List<SessionGroup>) : Action
+        data object SharedGroupsPollTick : Action
+        data object ClearGroupsError : Action
         /** A computer paired for the first time: open the drawer on its sessions. */
         data object PairedComputerOpened : Action
         /** The install's first computer paired: a ready session in its latest project, with starter prompts. */
@@ -844,6 +883,11 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data class ViewReceipt(val sessionID: String) : CancelID
         data object SessionSearch : CancelID
         data object OlderSessions : CancelID
+        data object SharedGroupsRead : CancelID
+        data object SharedGroupsWrite : CancelID
+        data object SharedGroupsPoll : CancelID
+        data object SharedGroupsImport : CancelID
+        data object GroupsError : CancelID
     }
 
     /** The assembled body (`HomeFeatureComposition.kt`). */

@@ -2,15 +2,19 @@ package ai.opencode.feature.drawer.list
 
 import ai.opencode.core.strings.localized
 import ai.opencode.feature.drawer.DrawerListFooter
+import ai.opencode.feature.drawer.GroupSharingStatus
+import ai.opencode.feature.drawer.groupSharingStatus
 import ai.opencode.feature.drawer.HomeFeature
 import ai.opencode.feature.drawer.HomeFeature.State.Indicator
 import ai.opencode.feature.drawer.R
 import ai.opencode.feature.drawer.ServerSwapTarget
 import ai.opencode.feature.drawer.ServerSwitchNote
+import ai.opencode.feature.drawer.canEditGroups
 import ai.opencode.feature.drawer.drawerListFooter
 import ai.opencode.feature.drawer.drawerSessions
 import ai.opencode.feature.drawer.hiddenSessionIDs
 import ai.opencode.feature.drawer.placeholderSession
+import ai.opencode.feature.drawer.shownGroups
 import ai.opencode.feature.drawer.statusSnapshot
 import ai.opencode.feature.drawer.style.DrawerSectionHeaderKind
 import ai.opencode.server.OpenCodeServer
@@ -128,6 +132,9 @@ data class DrawerListGroupHeader(
     /** It can trade places with the group above or below it; never while searching. */
     val canMoveUp: Boolean = false,
     val canMoveDown: Boolean = false,
+    /** Rename and Remove: always on the phone, on a shared server once its plugin offers them. */
+    val canRename: Boolean = true,
+    val canRemove: Boolean = true,
 )
 
 /** What the list shows besides its rows. */
@@ -169,6 +176,8 @@ data class DrawerListModel(
     val pagesRead: Int = 0,
     val serverID: String = "",
     val reducedMotion: Boolean = false,
+    /** The New Group row's sharing menu; null without one. */
+    val groupSharing: GroupSharingStatus? = null,
 ) {
     /** Every item in display order. */
     val items: List<DrawerListItem> get() = order.flatMap { sections[it].orEmpty() }
@@ -242,7 +251,8 @@ data class DrawerListModel(
             val rows = LinkedHashMap<String, DrawerListRow>()
             val headerFollows = HashMap<DrawerSectionHeaderKind, Boolean>()
             val hiddenIDs = state.hiddenSessionIDs
-            val membership = state.sessionGroups.membership(state.server.persistenceID)
+            val membership = state.shownGroups.membership(state.server.persistenceID)
+            val reorderable = state.canEditGroups("reorder")
             val searching = state.search.isNotEmpty()
 
             fun row(session: OpenCodeSession, pinned: Boolean, inGroup: Boolean = false) = DrawerListRow(
@@ -318,8 +328,10 @@ data class DrawerListModel(
                     count = count,
                     isCollapsed = collapsed,
                     sessionIDs = if (collapsed || id == foldedGroupID) emptyList() else unsentHere.map { it.session.id } + listed.map { it.id },
-                    canMoveUp = !searching && index > 0,
-                    canMoveDown = !searching && index < sessions.groups.lastIndex,
+                    canMoveUp = reorderable && !searching && index > 0,
+                    canMoveDown = reorderable && !searching && index < sessions.groups.lastIndex,
+                    canRename = state.canEditGroups("rename"),
+                    canRemove = state.canEditGroups("remove"),
                 )
                 groupItems += DrawerListItem.GroupHeader(id)
                 if (collapsed || id == foldedGroupID) continue
@@ -374,6 +386,7 @@ data class DrawerListModel(
                 footer = footer,
                 pagesRead = if (footer != null) state.sessionPages.pagesRead else 0,
                 serverID = swap?.id ?: state.server.persistenceID,
+                groupSharing = state.groupSharingStatus,
                 reducedMotion = inputs.reducedMotion,
             )
         }

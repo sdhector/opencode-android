@@ -13,7 +13,13 @@ import ai.opencode.server.model.OpenCodeOutgoingAttachment
 import ai.opencode.server.model.OpenCodeJob
 import ai.opencode.server.model.OpenCodeShell
 import ai.opencode.server.model.OpenCodeShellOutputPage
+import ai.opencode.server.model.OpenCodeRpcError
+import ai.opencode.server.model.OpenCodeSessionGroup
+import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
+import ai.opencode.server.model.OpenCodeSessionGroupsWrite
 import ai.opencode.server.model.PromptContext
+import ai.opencode.server.retry.RetryPolicy
+import ai.opencode.server.retry.withRetryPolicy
 import ai.opencode.server.testing.WireFixture
 import ai.opencode.server.testing.WireFixture.Reply
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +30,9 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -593,5 +602,102 @@ class WireRequestTests {
         for (address in allowed) assertTrue("should allow $address", !refused(address))
         for (address in blocked) assertTrue("should block $address", refused(address))
         assertTrue("HTTPS is never refused", !refused("https://8.8.8.8:9"))
+    }
+
+    @Test
+    fun sessionGroupsReadsWrapTheirInputAndUnwrapTheirOutput() = runTest {
+        val fixture = WireFixture { request ->
+            when (request.path) {
+                "/api/rpc/session-groups/capabilities" -> Reply.Json(
+                    200,
+                    """{"output":{"apiVersion":2,"refresh":"list","operationIDs":true,"mutations":["create","assign","reorder","rename","remove","import"]}}""",
+                )
+                else -> Reply.Json(200, """{"output":{"revision":1,"groups":[{"id":"local-reading","name":"Reading","sessionIDs":["ses_example"]}]}}""")
+            }
+        }
+        withFixture(fixture) {
+            val capabilities = OpenCodeClient.liveValue.sessionGroupsCapabilities(it.server)
+            assertEquals(2, capabilities.apiVersion)
+            assertTrue(capabilities.operationIDs)
+            assertEquals(setOf("create", "assign", "reorder", "rename", "remove", "import"), capabilities.mutations)
+
+            val snapshot = OpenCodeClient.liveValue.sessionGroups(it.server)
+            assertEquals(OpenCodeSessionGroupsSnapshot(1, listOf(OpenCodeSessionGroup("local-reading", "Reading", listOf("ses_example")))), snapshot)
+
+            assertEquals(listOf("POST /api/rpc/session-groups/capabilities", "POST /api/rpc/session-groups/list"), it.requests.map { r -> r.route })
+            for (request in it.requests) {
+                assertEquals(json("""{"input":{}}"""), request.json())
+                assertTrue(request.headers.entries.any { (name, value) -> name.equals("Content-Type", true) && value.startsWith("application/json") })
+            }
+        }
+    }
+
+    @Test
+    fun sessionGroupsWritesSendTheContractsBodies() = runTest {
+        withFixture(WireFixture { Reply.Json(200, """{"output":{"revision":3,"groups":[]}}""") }) { fixture ->
+            val client = OpenCodeClient.liveValue
+            val writes = listOf(
+                OpenCodeSessionGroupsWrite.Create("Reading") to """{"name":"Reading"}""",
+                OpenCodeSessionGroupsWrite.Assign(null, "ses_1") to """{"groupID":null,"sessionID":"ses_1"}""",
+                OpenCodeSessionGroupsWrite.Assign("grp_1", "ses_1") to """{"groupID":"grp_1","sessionID":"ses_1"}""",
+                OpenCodeSessionGroupsWrite.Reorder(listOf("b", "a")) to """{"groupIDs":["b","a"]}""",
+                OpenCodeSessionGroupsWrite.Rename("a", "Work") to """{"groupID":"a","name":"Work"}""",
+                OpenCodeSessionGroupsWrite.Remove("a") to """{"groupID":"a"}""",
+                OpenCodeSessionGroupsWrite.Import(listOf(OpenCodeSessionGroup("local-reading", "Reading", listOf("ses_example")))) to
+                    """{"groups":[{"id":"local-reading","name":"Reading","sessionIDs":["ses_example"]}]}""",
+            )
+            for ((write, input) in writes) {
+                val snapshot = client.writeSessionGroups(fixture.server, write, 2, "op-${write.method}")
+                assertEquals(3L, snapshot.revision)
+                val request = fixture.requests.last()
+                assertEquals("POST /api/rpc/session-groups/${write.method}", request.route)
+                val expected = json(input).jsonObject + mapOf("expectedRevision" to JsonPrimitive(2), "operationID" to JsonPrimitive("op-${write.method}"))
+                assertEquals(JsonObject(mapOf("input" to JsonObject(expected))), request.json())
+            }
+            client.writeSessionGroups(fixture.server, OpenCodeSessionGroupsWrite.Create("Old"), 0, null)
+            assertEquals("an older plugin gets no operation ID", json("""{"input":{"name":"Old","expectedRevision":0}}"""), fixture.requests.last().json())
+        }
+    }
+
+    @Test
+    fun sessionGroupsErrorsCarryTheirTypeAndRevision() = runTest {
+        val bodies = listOf(
+            """{"_tag":"RpcError","type":"revision_conflict","message":"Expected revision 0, found 1. List session groups and retry.","data":{"currentRevision":1}}""" to
+                OpenCodeRpcError(OpenCodeRpcError.REVISION_CONFLICT, 1),
+            """{"_tag":"RpcError","type":"import_refused","message":"No.","data":{"currentRevision":4}}""" to OpenCodeRpcError(OpenCodeRpcError.IMPORT_REFUSED, 4),
+            """{"_tag":"RpcError","type":"operation_conflict","message":"No.","data":{}}""" to OpenCodeRpcError(OpenCodeRpcError.OPERATION_CONFLICT),
+            """{"_tag":"RpcError","type":"rpc.invalid_input","message":"Missing key"}""" to OpenCodeRpcError(OpenCodeRpcError.SCHEMA_INVALID),
+        )
+        for ((body, expected) in bodies) {
+            withFixture(WireFixture { Reply.Json(400, body) }) { fixture ->
+                val error = expectClientError {
+                    OpenCodeClient.liveValue.writeSessionGroups(fixture.server, OpenCodeSessionGroupsWrite.Create("A"), 0, "op-1")
+                }
+                assertEquals(expected, error.rpcError)
+                assertEquals(400, error.statusCode)
+                assertEquals("a domain failure is never sent again", 1, fixture.requests.size)
+            }
+        }
+        withFixture(WireFixture { Reply.Json(400, """{"_tag":"Other","type":"x"}""") }) { fixture ->
+            assertNull(expectClientError { OpenCodeClient.liveValue.sessionGroups(fixture.server) }.rpcError)
+        }
+    }
+
+    @Test
+    fun aSessionGroupsWriteResendsTheSameOperationAfterALostAnswer() = runTest {
+        var calls = 0
+        val fixture = WireFixture {
+            calls += 1
+            if (calls == 1) Reply.Json(502, "") else Reply.Json(200, """{"output":{"revision":1,"groups":[{"id":"g","name":"A","sessionIDs":[]}]}}""")
+        }
+        withFixture(fixture) {
+            withDependenciesSuspending({ this[Clock] = ImmediateClock() }) {
+                withRetryPolicy(RetryPolicy(maxAttempts = 2, baseDelay = 1.seconds, maxDelay = 1.seconds, retryWindow = null, waitsForNetwork = false)) {
+                    OpenCodeClient.liveValue.writeSessionGroups(it.server, OpenCodeSessionGroupsWrite.Create("A"), 0, "op-1")
+                }
+            }
+            assertEquals(2, it.requests.size)
+            assertEquals("the resend is the same write under the same ID", it.requests[0].json(), it.requests[1].json())
+        }
     }
 }

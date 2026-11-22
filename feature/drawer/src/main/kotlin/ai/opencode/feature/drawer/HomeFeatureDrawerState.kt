@@ -234,10 +234,11 @@ val HomeFeature.State.drawerSessions: DrawerSessions
         for (key in pinnedSessionKeys) {
             if (key.startsWith(prefix)) pinnedIDs += key.removePrefix(prefix)
         }
-        val serverGroups = sessionGroups.groups(server.persistenceID)
+        val shown = shownGroups
+        val serverGroups = shown.groups(server.persistenceID)
         if (pinnedIDs.isEmpty() && serverGroups.isEmpty()) return DrawerSessions(emptyList(), visible.sortedByDescending { it.updatedAt })
         val pinnedSet = pinnedIDs.toHashSet()
-        val membership = sessionGroups.membership(server.persistenceID)
+        val membership = shown.membership(server.persistenceID)
         val byID = HashMap<String, OpenCodeSession>()
         val grouped = HashMap<String, MutableList<OpenCodeSession>>()
         val recents = mutableListOf<OpenCodeSession>()

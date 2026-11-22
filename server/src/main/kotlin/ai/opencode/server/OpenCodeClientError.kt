@@ -1,6 +1,7 @@
 package ai.opencode.server
 
 import ai.opencode.core.strings.localized
+import ai.opencode.server.model.OpenCodeRpcError
 import ai.opencode.server.retry.TransportFailure
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -37,6 +38,8 @@ data class OpenCodeClientError(
     val urlErrorCode: Int? = null,
     /** The request this answered was already settled, or is gone, on the server: trying again can't help. */
     val requestSettled: Boolean = false,
+    /** The tagged `RpcError` an `/api/rpc` route answered with. */
+    val rpcError: OpenCodeRpcError? = null,
 ) : Exception(message) {
 
     /**
@@ -96,6 +99,15 @@ data class OpenCodeClientError(
             }.getOrNull()
             return tag == "LocationNotFoundError"
         }
+
+        /** A `{"_tag":"RpcError","type":…,"data":{…}}` body; never its message, which is the server's text. */
+        fun rpcError(body: ByteArray): OpenCodeRpcError? = runCatching {
+            val root = Json.parseToJsonElement(body.decodeToString()) as? JsonObject ?: return null
+            if ((root["_tag"] as? JsonPrimitive)?.content != "RpcError") return null
+            val type = (root["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+            val revision = ((root["data"] as? JsonObject)?.get("currentRevision") as? JsonPrimitive)?.content?.toLongOrNull()
+            OpenCodeRpcError(type, revision)
+        }.getOrNull()
 
         /** A request that got no answer from the server. */
         fun unreachable(transport: TransportFailure) = OpenCodeClientError(UNREACHABLE_MESSAGE, transport = transport)

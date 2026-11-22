@@ -23,6 +23,7 @@ import ai.opencode.feature.composer.SharedComposerDraft
 import ai.opencode.feature.composer.SharedDraftTarget
 import ai.opencode.feature.drawer.HomeFeature.Action
 import ai.opencode.feature.drawer.HomeFeature.State
+import ai.opencode.feature.drawer.groups.GroupEdit
 import ai.opencode.feature.session.*
 import ai.opencode.feature.settings.SettingsFeature
 import ai.opencode.feature.system.SystemAction
@@ -241,8 +242,8 @@ internal fun HomeFeature.reduceDrawer(state: State, action: Action): HomeReduced
 
         is Action.DrawerRowDropped -> {
             var s = dropPin(state, action.sessionID, action.pinnedIndex)
-            if (action.pinnedIndex == null && state.isPinned(action.sessionID) && !s.isPinned(action.sessionID)) {
-                s = s.updatingSessionGroups { it.forgetting(state.server.persistenceID, action.sessionID) }
+            if (action.pinnedIndex == null && state.isPinned(action.sessionID) && !s.isPinned(action.sessionID) && s.groupID(action.sessionID) != null) {
+                s = s.editingGroups(GroupEdit.Assign(action.sessionID, null))
             }
             return Reduced(s)
         }
@@ -267,6 +268,7 @@ internal fun HomeFeature.reduceDrawer(state: State, action: Action): HomeReduced
                 persistence.settlePrompts(unsent.messageIDs)
                 var s = state.copy(pendingDeletion = null, unsentDrafts = persistence.unsentDrafts(state.server.persistenceID))
                     .updatingSessionGroups { it.forgetting(state.server.persistenceID, unsent.sessionID) }
+                    .forgettingWaitingGroupWrites(unsent.sessionID)
                 if (s.draftGroup?.draftID == unsent.draftID) s = s.copy(draftGroup = null)
                 val open = s.sessionDetail
                 if (open != null && open.session == null && open.outboxDraftID == unsent.draftID) s = s.openingDraft(reason = "you deleted it")

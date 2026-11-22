@@ -191,7 +191,7 @@ fun HomeDrawer(
     val selectedSessionID by store.observe { viewState.drawerSelectedSessionID(it) }
     val disconnected by store.observe { it.connectionStatus == HomeConnectionFeature.State.ConnectionStatus.disconnected }
     val search by store.observe { it.search }
-    val failure by store.observe { it.deletionError ?: it.inboxSidebarStatus.archiveError }
+    val failure by store.observe { it.deletionError ?: it.inboxSidebarStatus.archiveError ?: it.groupsError }
     val inboxSidebarOn = rememberInboxSidebarOn()
     val current by store.observe { it.server }
     val switchingTo by store.observe { it.switchingTo }
@@ -246,6 +246,7 @@ fun HomeDrawer(
     // Archived's count is fetched each time the drawer shows, so another client's archiving shows too.
     val serverID by store.observe { it.server.persistenceID }
     LaunchedEffect(serverID, isDrawerVisible) {
+        if (isDrawerVisible) store.send(HomeFeature.Action.GroupSharingDiscoveryRequested)
         if (isDrawerVisible) store.send(HomeFeature.Action.InboxSidebar(InboxSidebarFeature.Action.ArchivedListRequested))
     }
     val openArchived: () -> Unit = remember(viewState) {

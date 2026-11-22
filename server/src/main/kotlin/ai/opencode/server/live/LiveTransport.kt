@@ -315,7 +315,8 @@ private suspend fun performOnce(
         AppLog.network.notice {
             "$method ${loggablePath(path)}: HTTP ${response.code}${if (locationMissing) " (location missing)" else ""} after ${(clock.now() - started).logSummary}"
         }
-        throw statusError(response.code, response.headers["Retry-After"], locationMissing)
+        val rpcError = if (path.startsWith("/api/rpc/")) OpenCodeClientError.rpcError(response.body) else null
+        throw statusError(response.code, response.headers["Retry-After"], locationMissing).copy(rpcError = rpcError)
     }
     ServerContact.shared.heard(server.persistenceID, response.url)
     link.noteAnswer(if (isConnectionProbe) null else server.persistenceID)

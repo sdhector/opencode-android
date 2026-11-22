@@ -61,6 +61,47 @@
         <item quantity="other">%1$d sessions</item>
     </plurals>
 
+    <!-- Shared session groups -->
+    <string name="drawer_group_remove_shared_message">Its sessions stay as they are and return to Recents, on every device that shares these groups.</string>
+    <string name="drawer_groups_sharing_options">Group Sharing</string>
+    <string name="drawer_groups_shared_state">Shared with the computer</string>
+    <string name="drawer_groups_offline_state">Showing the computer’s last groups</string>
+    <string name="drawer_groups_share">Share Groups with Computer</string>
+    <string name="drawer_groups_import">Import Groups from This Phone</string>
+    <string name="drawer_groups_stop_sharing">Stop Sharing Groups</string>
+    <string name="drawer_groups_share_title">Share Groups?</string>
+    <string name="drawer_groups_share_message">The drawer will show the groups stored on the computer. Agents and your other devices can change them too.</string>
+    <plurals name="drawer_groups_share_replace_message">
+        <item quantity="one">The drawer will show the computer’s groups instead of the group on this phone. Nothing is merged: this phone’s group is kept and comes back if you stop sharing.</item>
+        <item quantity="other">The drawer will show the computer’s groups instead of the %1$d groups on this phone. Nothing is merged: this phone’s groups are kept and come back if you stop sharing.</item>
+    </plurals>
+    <plurals name="drawer_groups_share_import_message">
+        <item quantity="one">The computer has no groups yet. Import the group on this phone too? It also stays on this phone.</item>
+        <item quantity="other">The computer has no groups yet. Import the %1$d groups on this phone too? They also stay on this phone.</item>
+    </plurals>
+    <string name="drawer_groups_share_confirm">Share</string>
+    <string name="drawer_groups_share_and_import">Import and Share</string>
+    <string name="drawer_groups_share_only">Share Only</string>
+    <plurals name="drawer_groups_import_title">
+        <item quantity="one">Import %1$d Group?</item>
+        <item quantity="other">Import %1$d Groups?</item>
+    </plurals>
+    <string name="drawer_groups_import_message">Copies this phone’s groups to the computer. They also stay on this phone. A computer accepts an import only before its groups are first changed.</string>
+    <string name="drawer_groups_import_confirm">Import</string>
+    <string name="drawer_groups_stop_title">Stop Sharing Groups?</string>
+    <string name="drawer_groups_stop_message">The drawer goes back to the groups on this phone. The computer keeps its groups for agents and your other devices.</string>
+    <string name="drawer_groups_stop_confirm">Stop Sharing</string>
+    <string name="drawer_groups_error">Couldn’t update shared groups</string>
+    <string name="drawer_groups_error_unreachable">The computer couldn’t be reached, so the change wasn’t saved. The drawer shows its last groups.</string>
+    <string name="drawer_groups_error_no_plugin">This computer can’t share groups.</string>
+    <string name="drawer_groups_error_conflict">The groups changed on the computer before your change arrived. The latest groups are shown.</string>
+    <string name="drawer_groups_error_group_gone">That group is no longer on the computer.</string>
+    <string name="drawer_groups_error_session_gone">That session is no longer on the computer.</string>
+    <string name="drawer_groups_error_rejected">The computer didn’t accept the change.</string>
+    <string name="drawer_groups_error_import_refused">The computer already has shared groups, so nothing was imported. This phone’s groups are kept.</string>
+    <string name="drawer_groups_error_import_session_gone">A session in these groups is no longer on the computer, so nothing was imported.</string>
+    <string name="drawer_groups_error_import_unreachable">The computer couldn’t be reached. Import again: nothing is copied twice.</string>
+
     <!-- Section headers, shortcut rows and list footer -->
     <string name="drawer_section_pinned">Pinned</string>
     <string name="drawer_section_recents">Recents</string>

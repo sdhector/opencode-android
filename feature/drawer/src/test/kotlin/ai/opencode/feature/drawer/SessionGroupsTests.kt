@@ -8,6 +8,7 @@ import ai.opencode.core.dependencies.UuidClient
 import ai.opencode.core.haptics.Haptic
 import ai.opencode.core.haptics.HapticsClient
 import ai.opencode.core.sharing.SharedKeys
+import ai.opencode.core.strings.localized
 import ai.opencode.core.testing.TestIsolationRule
 import ai.opencode.feature.composer.PendingPrompt
 import ai.opencode.feature.composer.PromptOutbox
@@ -19,10 +20,27 @@ import ai.opencode.feature.drawer.HomeFeatureTestSupport.detail
 import ai.opencode.feature.drawer.HomeFeatureTestSupport.homeTest
 import ai.opencode.feature.drawer.HomeFeatureTestSupport.receiveBounded
 import ai.opencode.feature.drawer.HomeFeatureTestSupport.snapshot
+import ai.opencode.core.dependencies.TestClock
+import ai.opencode.core.store.TestStore
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
+import ai.opencode.feature.drawer.groups.GroupEdit
+import ai.opencode.feature.drawer.groups.GroupSharingPrompt
+import ai.opencode.feature.drawer.groups.GroupSync
+import ai.opencode.feature.drawer.groups.GroupWrite
+import ai.opencode.feature.drawer.groups.PendingImport
 import ai.opencode.feature.drawer.groups.SessionGroup
 import ai.opencode.feature.drawer.groups.SessionGroups
+import ai.opencode.feature.drawer.groups.SharedGroupsServer
+import ai.opencode.feature.drawer.groups.SharedSessionGroups
+import ai.opencode.server.model.OpenCodeRpcError
+import ai.opencode.server.model.OpenCodeSessionGroup
+import ai.opencode.server.model.OpenCodeSessionGroupsCapabilities
+import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
+import ai.opencode.server.model.OpenCodeSessionGroupsWrite
+import kotlinx.coroutines.test.runTest
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import ai.opencode.feature.drawer.list.DrawerListInputs
 import ai.opencode.feature.drawer.list.DrawerListItem
 import ai.opencode.feature.drawer.list.DrawerListModel
@@ -693,6 +711,494 @@ class SessionGroupsTests {
         assertTrue(model.rows["ses_queued"]?.inGroup == true)
         assertNotNull(model.rows["ses_queued"]?.unsent)
         assertEquals("the group counts it", 1, model.groupHeaders["g"]?.count)
+    }
+
+    // endregion
+
+    // region Shared groups
+
+    /** The session-groups plugin as the contract describes it: revision checks, operation receipts, one import. */
+    private class FakeGroupsPlugin(var sessions: Set<String> = emptySet()) {
+        var revision = 0L
+        var groups = listOf<OpenCodeSessionGroup>()
+        var initialized = false
+        val calls = mutableListOf<String>()
+        val sent = mutableListOf<Triple<OpenCodeSessionGroupsWrite, Long, String?>>()
+        private val receipts = HashMap<String, Pair<OpenCodeSessionGroupsWrite, Long>>()
+        private var ids = 0
+        var capabilities: OpenCodeSessionGroupsCapabilities? = OpenCodeSessionGroupsCapabilities(
+            2, setOf("create", "assign", "reorder", "rename", "remove", "import"), operationIDs = true,
+        )
+        /** Thrown (once) instead of answering the next write. */
+        var failNextWrite: OpenCodeClientError? = null
+        var failReads: OpenCodeClientError? = null
+
+        fun snapshot() = OpenCodeSessionGroupsSnapshot(revision, groups)
+
+        /** Another client's write. */
+        fun elsewhere(change: (List<OpenCodeSessionGroup>) -> List<OpenCodeSessionGroup>) {
+            groups = change(groups)
+            revision += 1
+            initialized = true
+        }
+
+        fun rpc(type: String, revision: Long? = null) = OpenCodeClientError("rpc", statusCode = 400, rpcError = OpenCodeRpcError(type, revision))
+
+        fun write(write: OpenCodeSessionGroupsWrite, expected: Long, operationID: String?): OpenCodeSessionGroupsSnapshot {
+            calls += write.method
+            sent += Triple(write, expected, operationID)
+            failNextWrite?.let { failNextWrite = null; throw it }
+            if (operationID != null) {
+                receipts[operationID]?.let { (w, e) -> if (w == write && e == expected) return snapshot() else throw rpc(OpenCodeRpcError.OPERATION_CONFLICT) }
+            }
+            if (write is OpenCodeSessionGroupsWrite.Import && initialized) throw rpc(OpenCodeRpcError.IMPORT_REFUSED, revision)
+            if (expected != revision) throw rpc(OpenCodeRpcError.REVISION_CONFLICT, revision)
+            groups = when (write) {
+                is OpenCodeSessionGroupsWrite.Create -> groups + OpenCodeSessionGroup("srv_${++ids}", write.name.trim())
+                is OpenCodeSessionGroupsWrite.Assign -> {
+                    if (write.sessionID !in sessions) throw rpc(OpenCodeRpcError.SESSION_NOT_FOUND)
+                    if (write.groupID != null && groups.none { it.id == write.groupID }) throw rpc(OpenCodeRpcError.GROUP_NOT_FOUND)
+                    groups.map { group ->
+                        val kept = group.sessionIDs - write.sessionID
+                        if (group.id == write.groupID) group.copy(sessionIDs = if (write.sessionID in group.sessionIDs) group.sessionIDs else kept + write.sessionID)
+                        else group.copy(sessionIDs = kept)
+                    }
+                }
+                is OpenCodeSessionGroupsWrite.Reorder -> write.groupIDs.map { id -> groups.first { it.id == id } }
+                is OpenCodeSessionGroupsWrite.Rename -> groups.map { if (it.id == write.groupID) it.copy(name = write.name) else it }
+                is OpenCodeSessionGroupsWrite.Remove -> {
+                    if (groups.none { it.id == write.groupID }) throw rpc(OpenCodeRpcError.GROUP_NOT_FOUND)
+                    groups.filterNot { it.id == write.groupID }
+                }
+                is OpenCodeSessionGroupsWrite.Import -> {
+                    if (write.groups.any { group -> group.sessionIDs.any { it !in sessions } }) throw rpc(OpenCodeRpcError.SESSION_NOT_FOUND)
+                    write.groups
+                }
+            }
+            revision += 1
+            initialized = true
+            if (operationID != null) receipts[operationID] = write to expected
+            return snapshot()
+        }
+
+        fun client(): OpenCodeClient = OpenCodeClient.testValue.copy(
+            sessionGroupsCapabilities = {
+                calls += "capabilities"
+                capabilities ?: throw rpc(OpenCodeRpcError.METHOD_NOT_FOUND)
+            },
+            sessionGroups = {
+                calls += "list"
+                failReads?.let { throw it }
+                snapshot()
+            },
+            writeSessionGroups = { _, write, expected, operationID -> write(write, expected, operationID) },
+            getSession = { _, id ->
+                if (id !in sessions) throw OpenCodeClientError("gone", statusCode = 404)
+                OpenCodeSession(id = id, serverTitle = id, projectID = "p", directory = "/project", updatedAt = Instant.EPOCH)
+            },
+        )
+    }
+
+    private fun HomeFeature.State.connected(): HomeFeature.State =
+        copy(connection = connection.copy(connectionStatus = HomeConnectionFeature.State.ConnectionStatus.connected))
+
+    private fun sharedGroups(revision: Long, vararg groups: SessionGroup, collapsed: Set<String> = emptySet()) =
+        SharedSessionGroups(mapOf(serverID to SharedGroupsServer(revision, groups.toList(), collapsed)))
+
+    private suspend fun TestStore<HomeFeature.State, Action>.settled() {
+        repeat(20) { skipReceivedActions() }
+    }
+
+    private suspend fun TestStore<HomeFeature.State, Action>.receiveWrite() =
+        receive({ it is Action.SharedGroupsWritten }, "a shared groups write's answer")
+
+    private suspend fun TestStore<HomeFeature.State, Action>.receiveRead() =
+        receive({ it is Action.SharedGroupsRead }, "a shared groups read")
+
+    @Test
+    fun aServerWithoutThePluginKeepsItsGroupsOnThePhoneAndOffersNoSharing() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sessionGroups, groups(group("g", "a")))
+        val requests = mutableListOf<String>()
+        val missing = OpenCodeClientError("missing", statusCode = 404)
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40), session("b", 30)))) }.connected()) {
+            this[OpenCodeClient] = OpenCodeClient.testValue.copy(
+                sessionGroupsCapabilities = { requests += "capabilities"; throw missing },
+                sessionGroups = { requests += "list"; throw missing },
+            )
+        }
+        store.exhaustive = false
+        store.send(Action.GroupSharingDiscoveryRequested)
+        store.receiveRead()
+        assertEquals(GroupSync.Support.Unavailable, store.state.groupSync.support)
+        assertNull("the drawer looks as it did", store.state.groupSharingStatus)
+        assertNull(store.state.model().groupSharing)
+
+        store.send(Action.GroupSharingDiscoveryRequested)
+        store.send(Action.MoveSessionsToGroup(listOf("b"), "g"))
+        assertEquals("discovery runs once, and edits stay on the phone", listOf("capabilities", "list"), requests)
+        assertEquals(listOf("a", "b"), h.shared(DrawerSharedKeys.sessionGroups).group(serverID, "g")?.sessionIDs)
+        assertTrue(h.shared(DrawerSharedKeys.sharedSessionGroups).byServer.isEmpty())
+    }
+
+    @Test
+    fun sharingAFreshStoreImportsOnlyThisServersGroupsOnceAndKeepsThePhonesCopy() = homeTest { h ->
+        val local = SessionGroups(
+            mapOf(
+                serverID to listOf(group("g1", "a", "b", collapsed = true), group("g2", "c")),
+                otherServer.persistenceID to listOf(group("other", "z")),
+            ),
+        )
+        h.setShared(DrawerSharedKeys.sessionGroups, local)
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b", "c", "old"))
+        val sessions = listOf(session("a", 40), session("b", 30), session("c", 20))
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+        }
+        store.exhaustive = false
+        store.send(Action.GroupSharingDiscoveryRequested)
+        store.receiveRead()
+        assertEquals(GroupSharingStatus(isShared = false, isOffline = false, canImport = false), store.state.groupSharingStatus)
+
+        store.send(Action.ShareGroupsTapped)
+        store.receiveRead()
+        val prompt = store.state.groupSync.prompt as GroupSharingPrompt.Share
+        assertTrue("a never-written store with phone groups offers the import", prompt.canImport)
+        assertEquals(2, prompt.localGroupCount)
+        assertTrue("nothing is written before the answer", plugin.sent.isEmpty())
+
+        store.send(Action.ShareGroupsConfirmed(importsLocal = true))
+        store.receive({ it is Action.SharedGroupsImportPrepared })
+        assertEquals(listOf(true, false), store.state.serverGroups.map { it.isCollapsed })
+        store.receiveWrite()
+        val (write, expected, operationID) = plugin.sent.single()
+        assertEquals(0L, expected)
+        assertNotNull(operationID)
+        assertEquals(
+            "only this server's groups, with IDs, names and ordered sessions",
+            OpenCodeSessionGroupsWrite.Import(listOf(OpenCodeSessionGroup("g1", "Group g1", listOf("a", "b")), OpenCodeSessionGroup("g2", "Group g2", listOf("c")))),
+            write,
+        )
+        assertEquals(1L, store.state.sharedGroups?.revision)
+        assertEquals(listOf("g1", "g2"), store.state.serverGroups.map { it.id })
+        assertNull(store.state.sharedGroups?.pendingImport)
+        assertEquals("the phone's own groups are kept untouched", local, h.shared(DrawerSharedKeys.sessionGroups))
+        assertFalse("an initialized store offers no import", store.state.groupSharingStatus!!.canImport)
+        assertEquals("the shared drawer keeps the phone's collapse state", listOf(true, false), store.state.serverGroups.map { it.isCollapsed })
+        assertEquals(setOf("g1"), h.shared(DrawerSharedKeys.sharedSessionGroups)[serverID]?.collapsedIDs)
+
+        store.send(Action.StopSharingGroupsTapped)
+        store.send(Action.StopSharingGroupsConfirmed)
+        assertNull(store.state.sharedGroups)
+        assertEquals("stopping returns the phone's groups", local.groups(serverID), store.state.serverGroups)
+        assertEquals(1, plugin.calls.count { it == "import" })
+    }
+
+    @Test
+    fun sharingWhenBothHaveGroupsNeitherMergesNorOverwrites() = homeTest { h ->
+        val local = groups(group("mine", "a"))
+        h.setShared(DrawerSharedKeys.sessionGroups, local)
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b"))
+        plugin.elsewhere { listOf(OpenCodeSessionGroup("theirs", "Theirs", listOf("b"))) }
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40), session("b", 30)))) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+        }
+        store.exhaustive = false
+        store.send(Action.ShareGroupsTapped)
+        store.receiveRead()
+        val prompt = store.state.groupSync.prompt as GroupSharingPrompt.Share
+        assertFalse(prompt.canImport)
+        assertEquals(1, prompt.serverGroupCount)
+        assertEquals("no switch until the answer", listOf("mine"), store.state.serverGroups.map { it.id })
+
+        store.send(Action.ShareGroupsConfirmed(importsLocal = true))
+        store.settled()
+        assertEquals(listOf("theirs"), store.state.serverGroups.map { it.id })
+        assertTrue("nothing written", plugin.sent.isEmpty())
+        assertEquals(local, h.shared(DrawerSharedKeys.sessionGroups))
+        store.send(Action.ImportLocalGroupsTapped)
+        assertNull("no import into an initialized store", store.state.groupSync.prompt)
+    }
+
+    @Test
+    fun aSharedGroupIsCreatedOnTheServerAndItsSessionsAssignedUnderTheServersID() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b"))
+        val sessions = listOf(session("a", 40), session("b", 30))
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+        }
+        store.exhaustive = false
+        store.send(Action.CreateGroup("  Work  ", listOf("a", "b")))
+        assertEquals("it shows at once", listOf("Work"), store.state.serverGroups.map { it.name })
+        assertEquals(listOf("a", "b"), store.state.serverGroups.single().sessionIDs)
+        store.receiveRead()
+        repeat(3) { store.receiveWrite() }
+
+        assertEquals(listOf("capabilities", "list", "create", "assign", "assign"), plugin.calls)
+        assertEquals(listOf(0L, 1L, 2L), plugin.sent.map { it.second })
+        assertEquals("every logical write has its own ID", 3, plugin.sent.map { it.third }.toSet().size)
+        assertEquals(OpenCodeSessionGroupsWrite.Assign("srv_1", "a"), plugin.sent[1].first)
+        assertEquals(listOf(SessionGroup("srv_1", "Work", sessionIDs = listOf("a", "b"))), store.state.serverGroups)
+        assertEquals(3L, store.state.sharedGroups?.revision)
+        assertTrue(store.state.groupSync.queue.isEmpty())
+        assertTrue("the phone's own store isn't written", h.shared(DrawerSharedKeys.sessionGroups).byServer.isEmpty())
+        assertEquals("no session was renamed, moved or archived", sessions, store.state.sessions)
+    }
+
+    @Test
+    fun aStaleWriteIsRejectedVisiblyRefreshedAndTheNextEditStillGoes() = homeTest { h ->
+        val g = SessionGroup("g", "G")
+        val other = SessionGroup("o", "Other")
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(1, g, other, collapsed = setOf("o")))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b"))
+        plugin.groups = listOf(OpenCodeSessionGroup("g", "G"), OpenCodeSessionGroup("o", "Other"))
+        plugin.revision = 1
+        plugin.initialized = true
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40), session("b", 30)))) }.connected().copy(isDrawerOpen = true)) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+            this[Clock] = TestClock()
+        }
+        store.exhaustive = false
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        // An agent renames a group between this phone's read and its write.
+        plugin.elsewhere { list -> list.map { if (it.id == "g") it.copy(name = "Agent") else it } }
+
+        store.send(Action.RenameGroup("g", "Mine"))
+        assertEquals("it shows at once", "Mine", store.state.serverGroups.first().name)
+        store.send(Action.MoveSessionsToGroup(listOf("a"), "o"))
+        store.settled()
+        assertNotNull("the rejection shows", store.state.groupsError)
+        assertEquals(DrawerFailure.Action.groups, store.state.groupsError?.action)
+        assertEquals(localized(R.string.drawer_groups_error_conflict), store.state.groupsError?.detail)
+
+        assertEquals("the other writer's name stands", "Agent", store.state.serverGroups.first().name)
+        assertEquals("the unrelated edit went through after the refresh", listOf("a"), store.state.serverGroups.first { it.id == "o" }.sessionIDs)
+        assertEquals(listOf("rename", "assign"), plugin.sent.map { it.first.method })
+        assertEquals(listOf(1L, 2L), plugin.sent.map { it.second })
+        assertTrue("collapse is kept", store.state.serverGroups.first { it.id == "o" }.isCollapsed)
+        assertEquals(listOf("capabilities", "list", "rename", "list", "assign"), plugin.calls)
+        store.skipInFlightEffects()
+    }
+
+    @Test
+    fun aSharedServerThatCantBeReachedKeepsItsLastGroupsAndWritesNothingOnThePhone() = homeTest { h ->
+        val g = SessionGroup("g", "G", sessionIDs = listOf("a"))
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(4, g))
+        h.setShared(DrawerSharedKeys.sessionGroups, groups(group("mine")))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b"))
+        plugin.failReads = OpenCodeClientError.unreachable(ai.opencode.server.retry.TransportFailure.NotSent)
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40), session("b", 30)))) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+            this[Clock] = TestClock()
+        }
+        store.exhaustive = false
+        assertEquals("shared and not yet known offline", GroupSharingStatus(isShared = true, isOffline = false, canImport = false), store.state.groupSharingStatus)
+        store.send(Action.MoveSessionsToGroup(listOf("b"), "g"))
+        assertEquals(listOf("a", "b"), store.state.serverGroups.single().sessionIDs)
+        store.settled()
+
+        assertTrue(store.state.groupSharingStatus!!.isOffline)
+        assertEquals("the edit is dropped, the last snapshot stays", listOf(g), store.state.serverGroups)
+        assertNotNull(store.state.groupsError)
+        assertTrue("nothing reached the server", plugin.sent.isEmpty())
+        assertEquals("the phone's own groups are untouched", groups(group("mine")), h.shared(DrawerSharedKeys.sessionGroups))
+        assertEquals(4L, h.shared(DrawerSharedKeys.sharedSessionGroups)[serverID]?.revision)
+    }
+
+    @Test
+    fun answersForAnotherServerOrAnOlderRevisionAreIgnored() = homeTest { h ->
+        val g = SessionGroup("g", "G")
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(5, g))
+        fun HomeFeature.State.reading() = copy(groupSync = groupSync.copy(isReading = true))
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(emptyList())) }.reading())
+        store.exhaustive = false
+        val capabilities = GroupSync.Support.Available(OpenCodeSessionGroupsCapabilities.original)
+        val stale = OpenCodeSessionGroupsSnapshot(3, listOf(OpenCodeSessionGroup("x", "Old")))
+        store.send(Action.SharedGroupsRead(otherServer.persistenceID, SharedGroupsReadResult(capabilities, stale.copy(revision = 9))))
+        assertTrue("another server's answer leaves this read waiting", store.state.groupSync.isReading)
+        store.send(Action.SharedGroupsRead(serverID, SharedGroupsReadResult(capabilities, stale)))
+        assertEquals(listOf(g), store.state.serverGroups)
+        assertEquals(5L, store.state.sharedGroups?.revision)
+        val next = h.store(store.state.reading())
+        next.exhaustive = false
+        next.send(Action.SharedGroupsRead(serverID, SharedGroupsReadResult(capabilities, stale.copy(revision = 6))))
+        assertEquals(listOf("x"), next.state.serverGroups.map { it.id })
+        assertFalse("the original contract offers no reorder", next.state.canEditGroups("reorder"))
+        assertTrue(next.state.canEditGroups("assign"))
+    }
+
+    @Test
+    fun anImportWhoseAnswerWasLostIsResentUnderTheSameOperation() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sessionGroups, groups(group("g1", "a")))
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a"))
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }.connected().copy(isDrawerOpen = true)) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+            this[Clock] = TestClock()
+        }
+        store.exhaustive = false
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        plugin.failNextWrite = OpenCodeClientError.unreachable(ai.opencode.server.retry.TransportFailure.TimedOut)
+        store.send(Action.ImportLocalGroupsTapped)
+        store.send(Action.ImportLocalGroupsConfirmed)
+        store.settled()
+        val pending = store.state.sharedGroups?.pendingImport
+        assertNotNull("the unanswered import is kept", pending)
+        assertNotNull(store.state.groupsError)
+
+        store.send(Action.ImportLocalGroupsTapped)
+        store.send(Action.ImportLocalGroupsConfirmed)
+        store.settled()
+        assertEquals(2, plugin.sent.size)
+        assertEquals("the same write under the same ID", plugin.sent[0], plugin.sent[1])
+        assertEquals(pending?.operationID, plugin.sent[1].third)
+        assertEquals(listOf("g1"), store.state.serverGroups.map { it.id })
+        assertNull(store.state.sharedGroups?.pendingImport)
+    }
+
+    @Test
+    fun droppingAPinnedRowOnASharedGroupUnpinsItHereAndAssignsItThere() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30))
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(2, SessionGroup("g", "G")))
+        h.setShared(SharedKeys.pinnedSessionKeys, listOf(base.sessionKey("a")))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b"))
+        plugin.groups = listOf(OpenCodeSessionGroup("g", "G"))
+        plugin.revision = 2
+        plugin.initialized = true
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+        }
+        store.exhaustive = false
+        store.send(Action.DrawerRowDroppedInGroup("a", "g"))
+        assertFalse(store.state.isPinned("a"))
+        store.receiveRead()
+        store.receiveWrite()
+        assertEquals(listOf(OpenCodeSessionGroupsWrite.Assign("g", "a")), plugin.sent.map { it.first })
+        assertEquals("g", store.state.groupID("a"))
+        assertEquals(sessions, store.state.sessions)
+    }
+
+    @Test
+    fun answersSharingNoLongerWaitsForChangeNothing() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(2, SessionGroup("g", "G")))
+        val write = GroupWrite("op-now", GroupEdit.Rename("g", "Now"))
+        val base = h.state { HomeFeature.State(server, snapshot(emptyList())) }
+        val writing = base.copy(groupSync = GroupSync(support = GroupSync.Support.Available(OpenCodeSessionGroupsCapabilities.original), queue = listOf(write), isWriting = true))
+        val store = h.store(writing)
+        store.exhaustive = false
+        val later = OpenCodeSessionGroupsSnapshot(9, listOf(OpenCodeSessionGroup("x", "Stale")))
+        store.send(Action.SharedGroupsWritten(serverID, "op-before-stop", snapshot = later))
+        assertEquals("the write in flight stays the only one", writing.groupSync, store.state.groupSync)
+        assertEquals(2L, store.state.sharedGroups?.revision)
+        store.send(Action.SharedGroupsRead(serverID, SharedGroupsReadResult(GroupSync.Support.Unavailable, later)))
+        assertEquals("a read no one waits for is dropped", writing.groupSync, store.state.groupSync)
+        assertEquals(listOf("g"), store.state.serverGroups.map { it.id })
+
+        val other = store.state.withServer(otherServer)
+        assertEquals("another server starts with nothing queued", GroupSync(), other.groupSync)
+        assertEquals(writing.groupSync, store.state.withServer(server.copy(name = "Renamed")).groupSync)
+    }
+
+    @Test
+    fun anImportKeepsThePhonesCollapseEvenWhenAReadLandedFirst() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sessionGroups, groups(group("g1", "a", collapsed = true), group("g2")))
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        val pending = PendingImport("op-import", listOf(SessionGroup("g1", "Group g1", sessionIDs = listOf("a")), SessionGroup("g2", "Group g2")))
+        val base = h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }
+        val store = h.store(
+            base.copy(
+                groupSync = GroupSync(
+                    support = GroupSync.Support.Available(OpenCodeSessionGroupsCapabilities(2, setOf("import"), true)),
+                    queue = listOf(GroupWrite("op-import", GroupEdit.Import(pending))),
+                    isWriting = true,
+                ),
+            ),
+        )
+        store.exhaustive = false
+        val imported = OpenCodeSessionGroupsSnapshot(1, listOf(OpenCodeSessionGroup("g1", "Group g1", listOf("a")), OpenCodeSessionGroup("g2", "Group g2")))
+        store.send(Action.SharedGroupsWritten(serverID, "op-import", snapshot = imported))
+        assertEquals(setOf("g1"), store.state.sharedGroups?.collapsedIDs)
+        assertEquals(listOf(true, false), store.state.serverGroups.map { it.isCollapsed })
+        assertNull(store.state.sharedGroups?.pendingImport)
+    }
+
+    @Test
+    fun droppingASharedGroupsPinnedRowOnRecentsUngroupsItThere() = homeTest { h ->
+        val sessions = listOf(session("a", 40))
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(2, SessionGroup("g", "G", sessionIDs = listOf("a"))))
+        h.setShared(SharedKeys.pinnedSessionKeys, listOf(base.sessionKey("a")))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a"))
+        plugin.groups = listOf(OpenCodeSessionGroup("g", "G", listOf("a")))
+        plugin.revision = 2
+        plugin.initialized = true
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+        }
+        store.exhaustive = false
+        store.send(Action.DrawerRowDropped("a", pinnedIndex = null))
+        assertFalse(store.state.isPinned("a"))
+        assertNull("it shows in Recents at once", store.state.groupID("a"))
+        store.settled()
+        assertEquals(listOf(OpenCodeSessionGroupsWrite.Assign(null, "a")), plugin.sent.map { it.first })
+        assertNull(store.state.groupID("a"))
+    }
+
+    @Test
+    fun theDrawerReadsSharedGroupsWhileItIsOpenAndStopsWhenItCloses() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(1, SessionGroup("g", "G")))
+        val plugin = FakeGroupsPlugin()
+        plugin.groups = listOf(OpenCodeSessionGroup("g", "G"))
+        plugin.revision = 1
+        val clock = TestClock()
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(emptyList())) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[Clock] = clock
+        }
+        store.exhaustive = false
+        store.send(Action.SessionDrawerArrived(isOpen = true))
+        store.receiveRead()
+        plugin.elsewhere { it + OpenCodeSessionGroup("new", "New") }
+        clock.advance(30.seconds)
+        store.receive(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        assertEquals("another client's group shows while the drawer stays open", listOf("g", "new"), store.state.serverGroups.map { it.id })
+
+        store.send(Action.SessionDrawerArrived(isOpen = false))
+        val reads = plugin.calls.count { it == "list" }
+        clock.advance(120.seconds)
+        store.settled()
+        assertEquals("a closed drawer reads nothing", reads, plugin.calls.count { it == "list" })
+    }
+
+    @Test
+    fun readsWaitOutAPluginThatIsStillLoadingAFewTimes() = runTest {
+        var attempts = 0
+        val loading = OpenCodeClientError("loading", statusCode = 400, rpcError = OpenCodeRpcError(OpenCodeRpcError.UNAVAILABLE))
+        val client = OpenCodeClient.testValue.copy(
+            sessionGroupsCapabilities = { attempts += 1; if (attempts < 3) throw loading else OpenCodeSessionGroupsCapabilities.original },
+            sessionGroups = { OpenCodeSessionGroupsSnapshot(0) },
+        )
+        val read = readSharedGroups(client, ImmediateClock(), server, GroupSync.Support.Unknown)
+        assertEquals(3, attempts)
+        assertEquals(OpenCodeSessionGroupsSnapshot(0), read.snapshot)
+
+        attempts = 0
+        val stuck = OpenCodeClient.testValue.copy(sessionGroupsCapabilities = { attempts += 1; throw loading }, sessionGroups = { throw loading })
+        val failed = readSharedGroups(stuck, ImmediateClock(), server, GroupSync.Support.Unknown)
+        assertEquals("bounded", 3, attempts)
+        assertEquals(GroupSync.Support.Unknown, failed.support)
+        assertNotNull(failed.error)
     }
 
     // endregion

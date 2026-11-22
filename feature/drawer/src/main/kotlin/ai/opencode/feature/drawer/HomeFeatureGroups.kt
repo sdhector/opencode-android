@@ -11,12 +11,14 @@ import ai.opencode.feature.drawer.HomeFeature.Action
 import ai.opencode.feature.drawer.HomeFeature.State
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
+import ai.opencode.feature.drawer.groups.GroupEdit
 import ai.opencode.feature.drawer.groups.SessionGroup
 import ai.opencode.feature.drawer.groups.SessionGroups
 
 /*
- * Local Session Groups: named, collapsible bundles of root sessions that live on this phone only.
- * Nothing here talks to the server or touches a session's title, project or directory.
+ * Session Groups: named, collapsible bundles of root sessions, on this phone or shared through the
+ * server's plugin (`HomeFeatureSharedGroups.kt`). Nothing here touches a session's title, archive,
+ * project or directory.
  */
 
 /** `$sessionGroups.withLock { … }`. */
@@ -28,9 +30,9 @@ internal fun State.updatingSessionGroups(transform: (SessionGroups) -> SessionGr
 }
 
 /** This server's groups, in the order the drawer shows them. */
-val State.serverGroups: List<SessionGroup> get() = sessionGroups.groups(server.persistenceID)
+val State.serverGroups: List<SessionGroup> get() = shownGroups.groups(server.persistenceID)
 
-fun State.groupID(sessionID: String): String? = sessionGroups.groupID(server.persistenceID, sessionID)
+fun State.groupID(sessionID: String): String? = shownGroups.groupID(server.persistenceID, sessionID)
 
 internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced {
     val haptics = dependency(HapticsClient)
@@ -38,7 +40,7 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
     when (action) {
         is Action.NewSessionInGroupTapped -> {
             if (state.connectionStatus == HomeConnectionFeature.State.ConnectionStatus.disconnected) return Reduced(state)
-            if (state.sessionGroups.group(serverID, action.groupID) == null) return Reduced(state)
+            if (state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
             val opened = state.leavingCatchUp().openingDraft(reason = "you tapped New Session in a group")
             val visit = opened.sessionDetail?.visit ?: return Reduced(opened)
             return Reduced(opened.copy(draftGroup = DraftGroupTarget(serverID, visit, action.groupID)))
@@ -49,24 +51,27 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
             haptics.play(Haptic.confirm)
             val groupID = "grp_" + dependency(UuidClient).next()
             val members = movableIDs(state, action.sessionIDs)
-            var s = members.fold(state) { acc, id -> acc.adoptingSearchResult(id) }
-            s = s.updatingSessionGroups { it.creating(serverID, groupID, action.name).assigning(serverID, members, groupID) }
-            return Reduced(s)
+            val s = members.fold(state) { acc, id -> acc.adoptingSearchResult(id) }
+            return Reduced(s.editingGroups(listOf(GroupEdit.Create(groupID, action.name)) + members.map { GroupEdit.Assign(it, groupID) }))
         }
 
-        is Action.RenameGroup ->
-            return Reduced(state.updatingSessionGroups { it.renaming(serverID, action.groupID, action.name) })
+        is Action.RenameGroup -> {
+            if (!state.canEditGroups("rename") || state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
+            if (SessionGroups.normalizedName(action.name) == null) return Reduced(state)
+            return Reduced(state.editingGroups(GroupEdit.Rename(action.groupID, action.name)))
+        }
 
         is Action.ToggleGroupCollapsed -> {
+            if (state.sharedGroups != null) return reduceSharedGroups(state, action)
             val group = state.sessionGroups.group(serverID, action.groupID) ?: return Reduced(state)
             haptics.play(Haptic.selection)
             return Reduced(state.updatingSessionGroups { it.settingCollapsed(serverID, action.groupID, !group.isCollapsed) })
         }
 
         is Action.RemoveGroup -> {
-            if (state.sessionGroups.group(serverID, action.groupID) == null) return Reduced(state)
+            if (!state.canEditGroups("remove") || state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
             haptics.play(Haptic.confirm)
-            var s = state.updatingSessionGroups { it.removing(serverID, action.groupID) }
+            var s = state.editingGroups(GroupEdit.Remove(action.groupID))
             if (s.draftGroup?.groupID == action.groupID) s = s.copy(draftGroup = null)
             return Reduced(s)
         }
@@ -74,7 +79,7 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
         is Action.MoveSessionsToGroup -> return Reduced(movingSessions(state, action.sessionIDs, action.groupID))
 
         is Action.DrawerRowDroppedInGroup -> {
-            if (action.groupID != null && state.sessionGroups.group(serverID, action.groupID) == null) return Reduced(state)
+            if (action.groupID != null && state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
             val unpinned = dropPin(state, action.sessionID, pinnedIndex = null)
             return Reduced(movingSessions(unpinned, listOf(action.sessionID), action.groupID))
         }
@@ -90,7 +95,7 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
 
         is Action.DrawerGroupDropped -> {
             if (!willMoveGroup(state, action.groupID, action.index)) return Reduced(state)
-            return Reduced(state.updatingSessionGroups { it.moving(serverID, action.groupID, action.index) })
+            return Reduced(state.editingGroups(GroupEdit.Move(action.groupID, action.index)))
         }
 
         else -> return Reduced(state)
@@ -98,28 +103,33 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
 }
 
 private fun willMoveGroup(state: State, groupID: String, index: Int): Boolean {
+    if (!state.canEditGroups("reorder")) return false
     val groups = state.serverGroups
     val from = groups.indexOfFirst { it.id == groupID }
     return from >= 0 && index.coerceIn(0, groups.size - 1) != from
 }
 
 private fun movingGroup(state: State, groupID: String, index: (Int) -> Int): State {
+    if (!state.canEditGroups("reorder")) return state
     val from = state.serverGroups.indexOfFirst { it.id == groupID }
     if (from < 0) return state
     val to = index(from)
     if (to !in state.serverGroups.indices) return state
     dependency(HapticsClient).play(Haptic.selection)
-    return state.updatingSessionGroups { it.moving(state.server.persistenceID, groupID, to) }
+    return state.editingGroups(GroupEdit.Move(groupID, to))
 }
 
 private fun movingSessions(state: State, ids: List<String>, groupID: String?): State {
     val serverID = state.server.persistenceID
     val members = movableIDs(state, ids)
     if (members.isEmpty()) return state
-    if (groupID != null && state.sessionGroups.group(serverID, groupID) == null) return state
+    val shown = state.shownGroups
+    if (groupID != null && shown.group(serverID, groupID) == null) return state
     dependency(HapticsClient).play(Haptic.selection)
     val s = members.fold(state) { acc, id -> acc.adoptingSearchResult(id) }
-    return s.updatingSessionGroups { it.assigning(serverID, members, groupID) }
+    // A shared group keeps its order when a member is assigned to it again; nothing needs sending.
+    val moving = if (s.sharedGroups == null) members else members.filter { shown.groupID(serverID, it) != groupID }
+    return s.editingGroups(moving.map { GroupEdit.Assign(it, groupID) })
 }
 
 /** The root sessions among [ids] (listed, found by search, or unsent), once each. */
@@ -140,7 +150,7 @@ private fun movableIDs(state: State, ids: List<String>): List<String> {
 internal fun State.resolvingDraftGroup(): State {
     val target = draftGroup ?: return this
     val serverID = server.persistenceID
-    if (target.serverID != serverID || sessionGroups.group(serverID, target.groupID) == null) return copy(draftGroup = null)
+    if (target.serverID != serverID || shownGroups.group(serverID, target.groupID) == null) return copy(draftGroup = null)
     var next = target
     var s = this
     val detail = sessionDetail
@@ -172,7 +182,6 @@ internal fun State.resolvingDraftGroup(): State {
 private fun State.withDraftGroup(target: DraftGroupTarget): State = if (target == draftGroup) this else copy(draftGroup = target)
 
 private fun State.assigningToGroup(sessionID: String, groupID: String): State {
-    val serverID = server.persistenceID
-    if (sessionGroups.groupID(serverID, sessionID) == groupID) return this
-    return updatingSessionGroups { it.assigning(serverID, listOf(sessionID), groupID) }
+    if (shownGroups.groupID(server.persistenceID, sessionID) == groupID) return this
+    return editingGroups(GroupEdit.Assign(sessionID, groupID))
 }

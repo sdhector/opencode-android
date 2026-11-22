@@ -435,6 +435,14 @@ fun DrawerListView(
     }
     shownPins[0] = pins
 
+    val groupSharingActions = remember(store) {
+        DrawerGroupSharingActions(
+            share = { store.send(HomeFeature.Action.ShareGroupsTapped) },
+            import = { store.send(HomeFeature.Action.ImportLocalGroupsTapped) },
+            stop = { store.send(HomeFeature.Action.StopSharingGroupsTapped) },
+        )
+    }
+
     Box(modifier) {
         // Beneath the rows: they move out of its way, and the lifted row (drawn in the list) stays
         // above it.
@@ -500,7 +508,12 @@ fun DrawerListView(
                         }
                         DrawerListGroupHeaderCell(header, groupActions, pinDrag, listCoordinates = { listCoordinates[0] })
                     }
-                    DrawerListItem.NewGroup -> DrawerListNewGroupRow(pinDrag, onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) })
+                    DrawerListItem.NewGroup -> DrawerListNewGroupRow(
+                        pinDrag,
+                        onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) },
+                        sharing = current.groupSharing,
+                        sharingActions = groupSharingActions,
+                    )
                     is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag)
                     DrawerListItem.RecentsDrop -> DrawerRecentsDropSlot(pinDrag)
                     DrawerListItem.Empty -> DrawerListEmptyRow(current.search)

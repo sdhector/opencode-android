@@ -75,6 +75,15 @@ Wire models the client decodes or encodes, needed below the feature modules: `Op
 `PromptContext`. Feature modules should use these rather than redeclare them.
 
 
+## Android-only: shared session groups RPC
+
+No iOS counterpart (local build). The `session-groups` plugin's RPC (verified on OpenCode 2.3.2), used by `docs/parity/drawer.md` § shared session groups.
+
+| iOS file | Kotlin file(s) | Status | Notes |
+| --- | --- | --- | --- |
+| – | `model/SessionGroupsRPC.kt`, `live/LiveSessionGroups.kt`, `OpenCodeClient.sessionGroupsCapabilities/sessionGroups/writeSessionGroups` | Android only | Authenticated `POST /api/rpc/session-groups/<method>` with `{"input":{…}}`, answered `{"output":…}`. `capabilities` and `list` take `{}`; writes carry `expectedRevision` and, when the plugin reports `operationIDs`, an `operationID` (then the write is idempotent to `NetworkRetry`, which resends the same body; without one it is `Unsafe`). Bodies are built by hand so `assign` sends `"groupID": null` to ungroup. |
+| – | `OpenCodeClientError.rpcError`, `LiveTransport.performOnce` | Android only | A non-2xx answer on an `/api/rpc/` route keeps its tagged `RpcError` type and `data.currentRevision` (`OpenCodeRpcError`); never the server's message. HTTP 400 stays permanent to the retry layer. |
+
 ## Diagnostics hooks (shared edit from `:devtools`)
 
 `server/.../DiagnosticsInstrumentation.kt` adds an OkHttp interceptor + `EventListener` to the request pools in `OpenCodeTransport.liveValue` (iOS `OpenCodeClient+Transport` calling `DiagnosticsRecorder.requestStarted/requestEnded/networkMetrics`); `LiveEvents.subscribeEvents` records `sse_connect_start/connected/resumed/disconnected` (iOS `DiagnosticsRecorder.stream`). Only method, redacted path, status, sizes and timings are kept. See devtools.md.
