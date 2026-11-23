@@ -110,6 +110,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -519,6 +520,7 @@ fun HomeDrawer(
         OpenCodeNoticePresence(
             followUpUndo.takeIf { failure == null },
             Modifier
+                .zIndex(1f)
                 .align(Alignment.BottomStart)
                 .padding(horizontal = DrawerMetrics.rowEdge)
                 .padding(bottom = controlsHeight.dp + insetBottom + footerBottom + 12.dp),
