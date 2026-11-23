@@ -48,8 +48,8 @@ from translations import (
     translated_path,
 )
 
-TRANSLATE_MODEL = "opencode/gpt-6.1-sol"
-REVIEW_MODEL = "opencode/gemini-3.8-flash"
+TRANSLATE_MODEL = "opencode/gemini-4-neon#high"
+REVIEW_MODEL = "opencode/gemini-4-neon#high"
 DESKTOP_URL = "https://raw.githubusercontent.com/anomalyco/opencode/dev"
 DESKTOP_FOLDERS = ["packages/app/src/runtime/i18n", "packages/ui/src/i18n"]
 CHUNK_SIZE = 60

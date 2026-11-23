@@ -110,6 +110,7 @@ internal fun ArrivingText(
     modifier: Modifier = Modifier,
     softWrap: Boolean = true,
     selectionKey: TranscriptSelectionLeafKey? = null,
+    onTextLayout: ((TextLayoutResult) -> Unit)? = null,
 ) {
     val context = LocalTranscriptRowContext.current
     // In a reply the list owns one selection across all its text.
@@ -172,7 +173,10 @@ internal fun ArrivingText(
                 color = color,
                 softWrap = softWrap,
                 inlineContent = presented.inlineContent,
-                onTextLayout = { layout = it },
+                onTextLayout = {
+                    layout = it
+                    onTextLayout?.invoke(it)
+                },
                 modifier = Modifier
                     .then(
                         if (replySelection != null && selectionKey != null) {

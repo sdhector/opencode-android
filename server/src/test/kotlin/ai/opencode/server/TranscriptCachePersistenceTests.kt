@@ -2,6 +2,7 @@ package ai.opencode.server
 
 import ai.opencode.core.testing.TestIsolationRule
 import ai.opencode.server.model.OpenCodeCompaction
+import ai.opencode.server.model.OpenCodeImageAttachment
 import ai.opencode.server.model.OpenCodeSession
 import ai.opencode.server.model.OpenCodeTranscriptItem
 import kotlinx.serialization.json.Json
@@ -107,6 +108,28 @@ class TranscriptCachePersistenceTests {
         assertTrue(data.size <= CachedTranscriptSnapshots.MAXIMUM_BYTES)
         assertTrue(decoded.entries.size < entries.size)
         assertEquals(entries.first().sessionID, decoded.entries.firstOrNull()?.sessionID)
+    }
+
+    @Test
+    fun transcriptPersistenceSkipsAnOversizedEntryWithoutEncodingAllOfIt() {
+        val text = "x".repeat(16_000_000)
+        val items = (0 until 64).map { index -> OpenCodeTranscriptItem.Info(id = "m_$index", text = text) }
+        val entry = CachedTranscriptSnapshots.Entry(serverID = "server", sessionID = "ses_big", updatedAt = date(1), items = items)
+        val data = requireNotNull(CachedTranscriptSnapshots(entries = listOf(entry)).encodedForPersistence())
+        val decoded = decoder.decodeFromString(CachedTranscriptSnapshots.serializer(), data.decodeToString())
+
+        assertTrue(decoded.entries.isEmpty())
+    }
+
+    @Test
+    fun transcriptPersistenceSkipsAnOversizedImageWithoutEncodingIt() {
+        val image = OpenCodeImageAttachment(id = "img", data = ByteArray(120_000_000), mime = "image/png")
+        val items = listOf(OpenCodeTranscriptItem.UserImages(id = "m_images", images = listOf(image)))
+        val entry = CachedTranscriptSnapshots.Entry(serverID = "server", sessionID = "ses_big", updatedAt = date(1), items = items)
+        val data = requireNotNull(CachedTranscriptSnapshots(entries = listOf(entry)).encodedForPersistence())
+        val decoded = decoder.decodeFromString(CachedTranscriptSnapshots.serializer(), data.decodeToString())
+
+        assertTrue(decoded.entries.isEmpty())
     }
 
     private fun prefetchSnapshot(text: String) = CachedTranscriptSnapshots(

@@ -87,9 +87,11 @@ internal fun HomeFeature.reduceConnection(state: State, action: Action): HomeRed
         val persistence = dependency(TranscriptCachePersistence)
         val sharedStore = dependency(SharedStore)
         val flush = Effect.run<Action> {
-            persistence.flush()
-            // Home's snapshots and read dates still waiting for the writer land too.
-            withContext(Dispatchers.IO) { sharedStore.flush() }
+            withContext(Dispatchers.IO) {
+                persistence.flush()
+                // Home's snapshots and read dates still waiting for the writer land too.
+                sharedStore.flush()
+            }
         }
         Reduced(state, Effect.merge(flush, flushPersistedComposer(state)))
     }

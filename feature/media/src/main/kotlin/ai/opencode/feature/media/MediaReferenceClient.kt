@@ -146,14 +146,15 @@ class MemoryWarningCenter {
 }
 
 /**
- * Memory (LRU, [MAX_MEMORY_BYTES] / [MAX_MEMORY_ENTRIES]) and disk (`<hash>.blob`) tiers over one
- * coalesced fetch per server and hash. A memory warning drops the memory tier; the disk tier and
- * the per-server 404s stay.
+ * Memory (LRU, [MAX_MEMORY_BYTES] / [MAX_MEMORY_ENTRIES]) and disk (`<hash>.blob`, [MAX_DISK_BYTES])
+ * tiers over one coalesced fetch per server and hash. A memory warning drops the memory tier; the
+ * disk tier and the per-server 404s stay.
  */
 class MediaReferenceLoader(
     private val directory: File?,
     private val fetch: Fetch = Fetch(MediaReferenceFetch::live),
     memoryWarnings: MemoryWarningCenter = MemoryWarningCenter.default,
+    private val maxDiskBytes: Long = MAX_DISK_BYTES,
 ) : CoalescedLoaderActor<MediaReferenceLoadResult>() {
     /** Throws [OpenCodeClientError]. */
     fun interface Fetch {
@@ -167,6 +168,9 @@ class MediaReferenceLoader(
     private val order = ArrayList<String>()
     private var totalBytes = 0
     private val unavailable = HashSet<UnavailableKey>()
+    private val diskLock = Any()
+    /** Bytes on disk, counted once from metadata, then kept by writes. */
+    private var diskBytes: Long? = null
 
     init {
         memoryWarnings.observe(::purgeMemory)
@@ -221,11 +225,6 @@ class MediaReferenceLoader(
                 return memory
             }
             else -> Unit
-        }
-        readDisk(hash)?.let { data ->
-            storeMemory(hash, data)
-            AppLog.network.info { "Media ref $prefix: cache hit (disk, ${data.size} bytes, status 200)" }
-            return MediaReferenceLoadResult.Loaded(data)
         }
         return coalesce("${server.persistenceID}|$hash") { resolve(server, hash) }
     }
@@ -294,7 +293,10 @@ class MediaReferenceLoader(
         val directory = directory ?: return null
         val file = File(directory, "$hash.blob")
         if (!file.isFile || file.length() > MAX_BLOB_BYTES) return null
-        return runCatching { file.readBytes() }.getOrNull()?.takeIf { it.size <= MAX_BLOB_BYTES }
+        val data = runCatching { file.readBytes() }.getOrNull()?.takeIf { it.size <= MAX_BLOB_BYTES } ?: return null
+        // A read is a use: the trim goes by modification date.
+        runCatching { file.setLastModified(System.currentTimeMillis()) }
+        return data
     }
 
     private fun writeDisk(hash: String, data: ByteArray) {
@@ -305,7 +307,17 @@ class MediaReferenceLoader(
             val partial = File.createTempFile("$hash.", ".partial", directory)
             try {
                 partial.writeBytes(data)
-                if (!partial.renameTo(File(directory, "$hash.blob"))) throw java.io.IOException("rename failed")
+                synchronized(diskLock) {
+                    val blob = File(directory, "$hash.blob")
+                    val replaced = blob.length()
+                    if (!partial.renameTo(blob)) throw java.io.IOException("rename failed")
+                    val counted = diskBytes?.let { it - replaced + data.size }
+                    diskBytes = if (counted != null && counted <= maxDiskBytes) {
+                        counted
+                    } else {
+                        trim(directory, maxDiskBytes, maxDiskBytes / 4 * 3, keeping = hash)
+                    }
+                }
             } finally {
                 partial.delete()
             }
@@ -318,12 +330,44 @@ class MediaReferenceLoader(
         const val MAX_MEMORY_BYTES = 48 * 1024 * 1024
         const val MAX_MEMORY_ENTRIES = 64
         const val MAX_BLOB_BYTES = 25 * 1024 * 1024
+        /**
+         * The disk tier's budget. Past it, least recently used blobs go until a quarter of it is free.
+         * Every blob here came from a server and can be fetched again.
+         */
+        const val MAX_DISK_BYTES = 256L * 1024 * 1024
 
         internal val shared: MediaReferenceLoader by lazy {
             MediaReferenceLoader(LinkPreviewLoader.cachesDirectory("media-references"))
         }
 
         fun shortHash(hash: String): String = MediaReferenceFetch.shortHash(hash)
+
+        private class DiskBlob(val file: File, val bytes: Long, val used: Long)
+
+        /**
+         * Counts the blobs from file metadata and, when they hold more than [budget] bytes, deletes the
+         * least recently used ones until at most [limit] remain (never [keeping], just written).
+         * Returns the bytes left.
+         */
+        internal fun trim(directory: File, budget: Long, limit: Long, keeping: String): Long {
+            val blobs = ArrayList<DiskBlob>()
+            var total = 0L
+            for (file in directory.listFiles() ?: return 0) {
+                if (!file.name.endsWith(".blob")) continue
+                val blob = DiskBlob(file, file.length(), file.lastModified())
+                blobs.add(blob)
+                total += blob.bytes
+            }
+            if (total <= budget) return total
+            blobs.sortBy { it.used }
+            for (blob in blobs) {
+                if (total <= limit) break
+                if (blob.file.name == "$keeping.blob") continue
+                if (blob.file.delete()) total -= blob.bytes else AppLog.network.error { "Media refs: couldn’t trim a blob" }
+            }
+            AppLog.network.info { "Media refs: trimmed disk cache to $total bytes" }
+            return total
+        }
 
         /** The error's kind, never its message. */
         private fun logDescription(error: OpenCodeClientError): String =

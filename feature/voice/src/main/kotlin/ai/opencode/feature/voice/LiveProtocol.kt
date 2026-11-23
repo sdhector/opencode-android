@@ -46,7 +46,8 @@ enum class VoiceEngine(val rawValue: String) {
         }
 
     /**
-     * How the voice model names itself when asked.
+     * How the voice model names itself when asked (Realtime and Grok Voice;
+     * GPT-Live's instructions have their own).
      */
     val selfDescription: String
         get() = when (this) {
@@ -206,7 +207,7 @@ data class LiveSessionConfig(
     val delegation: LiveDelegation = LiveDelegation.client,
     /**
      * OpenCode Session Delegator: sends unbound spoken updates (`delegationID == null`)
-     * via `session.instructions.append` because GPT-Live (measured on `gpt-live-1`) rejects `commentary`
+     * via `session.instructions.append` because `gpt-live-1` rejects `commentary`
      * without an active `delegation_id`.
      */
     val unboundSpeechUsesInstructions: Boolean = false,
@@ -239,7 +240,7 @@ data class LiveSessionConfig(
     }
 
     companion object {
-        const val defaultModel = "gpt-live-1.1"
+        const val defaultModel = "gpt-live-1"
     }
 }
 

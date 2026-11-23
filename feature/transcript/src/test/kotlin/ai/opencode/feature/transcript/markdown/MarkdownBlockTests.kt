@@ -122,6 +122,20 @@ class MarkdownBlockTests {
         assertEquals("Tail e\u0301", blocks[1].markdown)
     }
 
+    @Test(timeout = 2_000) fun coalescingManyAdjacentRunsStaysLinear() {
+        val runs = ArrayList<InlineRun>()
+        repeat(200_000) { runs.add(InlineRun("snake_")) }
+        val text = InlineText.coalesced(runs)
+        assertEquals(1, text.runs.size)
+        assertEquals(1_200_000, text.text.length)
+    }
+
+    @Test(timeout = 2_000) fun parsingManyStrayClosingBracketsStaysLinear() {
+        val source = "a ] ".repeat(150_000)
+        val text = InlineMarkdownParser.parse(source)
+        assertEquals(listOf(InlineRun(source)), text.runs)
+    }
+
     @Test fun inlineReuseMatchesFreshParsingAtEveryStreamingBoundary() {
         val cache = OpenCodeMarkdownBlock.InlineCache()
         var previous = emptyList<OpenCodeMarkdownBlock>()

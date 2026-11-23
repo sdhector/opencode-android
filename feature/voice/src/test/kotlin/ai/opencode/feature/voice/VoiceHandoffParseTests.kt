@@ -357,9 +357,9 @@ class VoiceSteeringInstructionsTests {
 
     @Test fun modelIdentityNamesTheActiveVoiceEngineAndAvoidsGuessing() {
         val live = VoiceInstructions.build(context, engine = VoiceEngine.gptLive)
-        assertTrue(live.contains("You are GPT-Live (gpt-live-1.1)"))
+        assertTrue(live.contains("You are GPT-Live (gpt-live-1)"))
         assertTrue(live.contains("that is your voice layer, inside OpenCode, whose sessions do the coding"))
-        assertTrue(live.contains("Questions about GPT-Live, Realtime, or which voice model or provider you are refer to this voice engine: answer directly that you are GPT-Live (gpt-live-1.1)"))
+        assertTrue(live.contains("Questions about GPT-Live, Realtime, or which voice model or provider you are refer to this voice engine: answer directly that you are GPT-Live (gpt-live-1)"))
         assertTrue(live.contains("say unknown rather than guessing"))
 
         val realtime = VoiceInstructions.build(context, engine = VoiceEngine.realtime)

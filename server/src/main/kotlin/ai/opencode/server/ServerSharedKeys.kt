@@ -27,7 +27,10 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.encodeToStream
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.time.Instant
 import java.util.UUID
 import java.util.WeakHashMap
@@ -149,9 +152,8 @@ data class CachedTranscriptSnapshots(
         var bytes = emptyBytes.size
         val retained = mutableListOf<ByteArray>()
         for (entry in entries.take(MAXIMUM_ENTRIES)) {
-            val encoded = try { persistenceJson.encodeToString(Entry.serializer(), entry).toByteArray() } catch (_: Exception) { continue }
             val separator = if (retained.isEmpty()) 0 else 1
-            if (bytes + encoded.size + separator > MAXIMUM_BYTES) break
+            val encoded = try { encodedWithin(entry, MAXIMUM_BYTES - bytes - separator) } catch (_: Exception) { continue } ?: break
             retained += encoded
             bytes += encoded.size + separator
         }
@@ -214,6 +216,54 @@ data class CachedTranscriptSnapshots(
             explicitNulls = false
             encodeDefaults = true
         }
+
+        /** The entry's JSON, or null as soon as it passes [limit] bytes. */
+        private fun encodedWithin(entry: Entry, limit: Int): ByteArray? {
+            if (minimumEncodedSize(entry, limit) > limit) return null
+            val stream = CappedOutputStream(limit)
+            try {
+                persistenceJson.encodeToStream(Entry.serializer(), entry, stream)
+            } catch (_: CappedOutputStream.Full) {
+                return null
+            }
+            return stream.toByteArray()
+        }
+
+        /** A lower bound on the entry's JSON bytes from its images and long texts, without encoding any of them. */
+        private fun minimumEncodedSize(entry: Entry, limit: Int): Long {
+            var size = 0L
+            for (item in entry.items) {
+                when (item) {
+                    is OpenCodeTranscriptItem.UserText -> size += item.text.length
+                    is OpenCodeTranscriptItem.AssistantMarkdown -> size += item.text.length
+                    is OpenCodeTranscriptItem.UserImages -> for (image in item.images) size += base64Length(image.data.size)
+                    is OpenCodeTranscriptItem.UserFiles -> for (file in item.files) size += file.text?.length ?: 0
+                    is OpenCodeTranscriptItem.Tool -> {
+                        for (output in item.call.output) size += output.length
+                        for (image in item.call.images.orEmpty()) size += base64Length(image.data.size)
+                    }
+                    else -> {}
+                }
+                if (size > limit) return size
+            }
+            return size
+        }
+
+        private fun base64Length(bytes: Int): Long = (bytes.toLong() + 2) / 3 * 4
+    }
+}
+
+private class CappedOutputStream(private val limit: Int) : ByteArrayOutputStream() {
+    class Full : IOException()
+
+    override fun write(b: Int) {
+        if (count + 1 > limit) throw Full()
+        super.write(b)
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        if (count + len > limit) throw Full()
+        super.write(b, off, len)
     }
 }
 

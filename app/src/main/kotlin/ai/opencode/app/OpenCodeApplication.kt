@@ -13,6 +13,8 @@ import ai.opencode.server.EventBatcherHooks
 import ai.opencode.server.retry.AppPhase
 import ai.opencode.server.retry.AppPhases
 import android.app.Application
+import androidx.core.os.UserManagerCompat
+import androidx.work.Configuration
 import androidx.compose.foundation.ComposeFoundationFlags
 import androidx.compose.foundation.ExperimentalFoundationApi
 import ai.opencode.core.dependencies.dependency
@@ -32,8 +34,17 @@ import android.util.Log
  * Process entry. Installs the application context as the one process-wide override; no synchronous
  * disk reads beyond what the first frame needs.
  */
-class OpenCodeApplication : Application() {
+class OpenCodeApplication : Application(), Configuration.Provider {
     private val launchScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    // Some devices report a locked user while storage is readable (issuetracker.google.com/578572401).
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
+            .setInitializationExceptionHandler { error ->
+                if (UserManagerCompat.isUserUnlocked(this)) throw error
+                AppLog.app.error { "WorkManager skipped its start-up checks: user locked" }
+            }
+            .build()
 
     @OptIn(ExperimentalFoundationApi::class)
     override fun onCreate() {
