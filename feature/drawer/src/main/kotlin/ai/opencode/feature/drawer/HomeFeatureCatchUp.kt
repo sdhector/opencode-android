@@ -50,7 +50,8 @@ internal fun HomeFeature.reduceCatchUp(state: State, action: CatchUpFeature.Acti
                 session = session.copy(idleMilliseconds = observed.idleMilliseconds)
             }
             val seenBeforeCard = if (state.sessionDetail?.session?.id == action.sessionID) state.sessionDetail?.catchUpOpeningSeen else null
-            var s = state.withCatchUp(
+            val marksRead = action.disposition == CatchUpFeature.Disposition.markRead
+            var s = (if (marksRead) state.notingFollowUpFromCatchUp(session) else state).withCatchUp(
                 stack.dismissFront(session, action.disposition, neededAttention = action.sessionID in state.attentionSessionIDs),
             )
             val opened = openCatchUpCard(s)

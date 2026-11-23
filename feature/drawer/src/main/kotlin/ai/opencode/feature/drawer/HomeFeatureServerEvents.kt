@@ -310,7 +310,7 @@ internal fun HomeFeature.reduceServerEvent(state: State, event: OpenCodeServerEv
             // Kept in place, so an open session stays open; the lists hide it. The refresh replaces
             // a snapshot read before the change, and brings back one unarchived elsewhere that fell
             // off the listed page.
-            var s = state.updatingSession(event.sessionID) { session ->
+            var s = (if (event.isArchived) state.notingFollowUpArchived(event.sessionID) else state).updatingSession(event.sessionID) { session ->
                 if (session.isArchived == event.isArchived) session
                 else session.copy(archivedMilliseconds = if (event.isArchived) dependency(DateClient).now().toEpochMilli() else null)
             }

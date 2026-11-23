@@ -23,6 +23,8 @@ import ai.opencode.feature.drawer.canEditGroups
 import ai.opencode.feature.drawer.drawerListFooter
 import ai.opencode.feature.drawer.drawerSessions
 import ai.opencode.feature.drawer.hiddenSessionIDs
+import ai.opencode.feature.drawer.openFollowUps
+import ai.opencode.feature.drawer.followup.FollowUp
 import ai.opencode.feature.drawer.placeholderSession
 import ai.opencode.feature.drawer.shownDrawerGroup
 import ai.opencode.feature.drawer.shownGroups
@@ -48,6 +50,8 @@ sealed interface DrawerListItem {
     data object WhatsNew : DrawerListItem
     /** Under Catch Up while the server has archived sessions. */
     data object Archived : DrawerListItem
+    /** Under Catch Up while this server has follow-ups, pending or snoozed: a tap opens the Follow Up page. */
+    data object FollowUp : DrawerListItem
     data class Header(val kind: DrawerSectionHeaderKind) : DrawerListItem
     data class Session(val id: String) : DrawerListItem
     /** A group's row ([DrawerListGroupHeader]): it opens the group; while searching, its matches follow it. */
@@ -72,6 +76,7 @@ sealed interface DrawerListItem {
             CatchUp -> "catch-up"
             WhatsNew -> "whats-new"
             Archived -> "archived"
+            FollowUp -> "follow-up"
             is Header -> "header-${kind.name}"
             is Session -> "session-$id"
             is GroupHeader -> "group-$groupID"
@@ -109,6 +114,8 @@ data class DrawerListRow(
     val groupID: String? = null,
     /** The row shows under its group's header. */
     val inGroup: Boolean = false,
+    /** A reply read on this phone and not handled yet: the outlined Follow Up dot, when no native status shows. */
+    val followUp: Boolean = false,
     /** A held row can be lifted to pin, unpin or move it; inside a group a hold only chooses it. */
     val canLift: Boolean = true,
 ) {
@@ -130,6 +137,7 @@ data class DrawerListRow(
                 Indicator.none -> ""
             }
             if (status.isNotEmpty()) parts += status
+            if (followUp) parts += localized(R.string.drawer_follow_up_state)
             if (time.isNotEmpty()) parts += time
             return parts.joinToString(", ")
         }
@@ -151,6 +159,8 @@ data class DrawerListGroupHeader(
     val canRemove: Boolean = true,
     /** Its sessions' and subgroups' status, rolled up; the row keeps the room for it either way. */
     val status: GroupStatus = GroupStatus.none,
+    /** Some member has a pending follow-up, whatever [status] shows. */
+    val hasFollowUp: Boolean = false,
     val isSubgroup: Boolean = false,
     /** Remove has to wait until its subgroups are moved or removed. */
     val hasSubgroups: Boolean = false,
@@ -170,6 +180,8 @@ data class DrawerListShortcuts(
     val catchUpFinish: Int? = null,
     val canMarkAllRead: Boolean = false,
     val showsWhatsNew: Boolean = false,
+    /** This server's pending follow-ups. */
+    val followUpCount: Int = 0,
 ) {
     val catchUpFinished: Boolean get() = catchUpFinish != null
     val showsCatchUp: Boolean get() = catchUpCount > 0 || catchUpFinished
@@ -256,6 +268,7 @@ data class DrawerListModel(
                 serverNote = state.serverSwitchNote
             }
             val status = state.statusSnapshot()
+            val followUps = state.openFollowUps
             val catchUpSessions = state.sessions.filter { status.needsCatchUp(it) }
             val catchUpCount = catchUpSessions.size
             val shortcuts = DrawerListShortcuts(
@@ -263,14 +276,18 @@ data class DrawerListModel(
                 catchUpFinish = if (state.catchUpState.justFinished && catchUpCount == 0) state.catchUpState.finishes else null,
                 canMarkAllRead = catchUpSessions.any { status.indicator(it) == Indicator.unread },
                 showsWhatsNew = state.showsWhatsNewButton,
+                followUpCount = followUps.count { it.value.status == FollowUp.Status.pending },
             )
             val archivedCount = if (state.search.isEmpty()) state.inboxSidebarStatus.archived.size else 0
-            val showsShortcuts = state.search.isEmpty() && (shortcuts.showsCatchUp || shortcuts.showsWhatsNew) || archivedCount > 0
+            val showsFollowUp = state.search.isEmpty() && followUps.isNotEmpty()
+            val showsShortcuts = state.search.isEmpty() && (shortcuts.showsCatchUp || shortcuts.showsWhatsNew) || archivedCount > 0 ||
+                showsFollowUp
 
             val top = buildList {
                 if (serverNote != null && state.search.isEmpty()) add(DrawerListItem.ServerNote)
                 if (state.search.isEmpty()) {
                     add(DrawerListItem.CatchUp)
+                    if (showsFollowUp) add(DrawerListItem.FollowUp)
                     add(DrawerListItem.WhatsNew)
                 }
                 if (archivedCount > 0) add(DrawerListItem.Archived)
@@ -304,6 +321,7 @@ data class DrawerListModel(
                 checked = if (inputs.checkedIDs.isEmpty()) null else session.id in inputs.checkedIDs,
                 groupID = membership[session.id],
                 inGroup = inGroup,
+                followUp = followUps[session.id]?.status == FollowUp.Status.pending,
             )
 
             fun header(kind: DrawerSectionHeaderKind, follows: Boolean): List<DrawerListItem> {
@@ -358,6 +376,7 @@ data class DrawerListModel(
                     canRename = state.canEditGroups("rename"),
                     canRemove = state.canEditGroups("remove"),
                     status = rollups[group.id]?.status ?: GroupStatus.none,
+                    hasFollowUp = rollups[group.id]?.hasFollowUp == true,
                     isSubgroup = group.id in parents,
                     hasSubgroups = group.id in parentIDs,
                     canCreateSubgroup = nests && group.id !in parents,

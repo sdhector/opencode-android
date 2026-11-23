@@ -24,6 +24,7 @@ import ai.opencode.core.ui.OpenCodeNoticePresence
 import ai.opencode.core.ui.OpenCodeTextStyles
 import ai.opencode.core.ui.OpenCodeTheme
 import ai.opencode.core.ui.SFSymbol
+import ai.opencode.core.ui.OpenCodeNoticeTone
 import ai.opencode.core.ui.openCodeTapTarget
 import ai.opencode.core.ui.rememberHighContrast
 import ai.opencode.feature.drawer.list.DrawerGroupDialogs
@@ -36,6 +37,9 @@ import ai.opencode.feature.drawer.list.ArchivedPage
 import ai.opencode.feature.drawer.list.archivedBeneath
 import ai.opencode.feature.drawer.list.archivedPage
 import ai.opencode.feature.drawer.list.rememberArchivedTransition
+import ai.opencode.feature.drawer.list.FollowUpPage
+import ai.opencode.feature.drawer.list.FollowUpSnoozeDialog
+import ai.opencode.feature.drawer.list.followUpUndoTitle
 import ai.opencode.feature.drawer.list.DeleteSelectionConfirmation
 import ai.opencode.feature.drawer.list.archivedSelectionActions
 import ai.opencode.feature.drawer.list.DrawerPinDrag
@@ -200,6 +204,7 @@ fun HomeDrawer(
     val disconnected by store.observe { it.connectionStatus == HomeConnectionFeature.State.ConnectionStatus.disconnected }
     val search by store.observe { it.search }
     val failure by store.observe { it.deletionError ?: it.inboxSidebarStatus.archiveError ?: it.groupsError }
+    val followUpUndo by store.observe { it.followUpUndo }
     val inboxSidebarOn = rememberInboxSidebarOn()
     // The group the list is inside (the Inbox Sidebar has no groups), and the one it shows: none while searching.
     val depth by store.observe { it.drawerPath.groupIDs.size }
@@ -242,7 +247,7 @@ fun HomeDrawer(
     val groupListStates = remember(current.persistenceID) { HashMap<String, LazyListState>() }
     groupListStates.keys.retainAll(pathIDs.toSet())
     val groupListState = trayGroup?.let { group -> groupListStates.getOrPut(group.id) { LazyListState() } }
-    PredictiveBackHandler(enabled = isDrawerVisible && trayGroup != null && !viewState.showsArchived) { events ->
+    PredictiveBackHandler(enabled = isDrawerVisible && trayGroup != null && !viewState.showsArchived && !viewState.showsFollowUp) { events ->
         try {
             events.collect { levelTransition.back.snapTo(it.progress) }
             store.send(HomeFeature.Action.DrawerGroupBackTapped)
@@ -264,6 +269,17 @@ fun HomeDrawer(
             throw cancel
         }
     }
+    // The Follow Up page moves as Archived's does.
+    val followUpTransition = rememberArchivedTransition(viewState.showsFollowUp, reducedMotion)
+    PredictiveBackHandler(enabled = viewState.showsFollowUp) { events ->
+        try {
+            events.collect { followUpTransition.back.snapTo(it.progress) }
+            viewState.showsFollowUp = false
+        } catch (cancel: CancellationException) {
+            followUpTransition.back.animateTo(0f, MotionRole.Layout.animation(MotionPhase.Enter, reducedMotion))
+            throw cancel
+        }
+    }
     BackHandler(enabled = selection.isActive) { selection.clear() }
     // The bar keeps its last count while it leaves.
     var shownCount by remember { mutableIntStateOf(0) }
@@ -272,6 +288,9 @@ fun HomeDrawer(
         if (!isDrawerVisible) {
             selection.clear()
             viewState.showsArchived = false
+            viewState.showsFollowUp = false
+        } else {
+            store.send(HomeFeature.Action.FollowUp(FollowUpAction.DueCheck))
         }
     }
     // Archived's count is fetched each time the drawer shows, so another client's archiving shows too.
@@ -314,6 +333,10 @@ fun HomeDrawer(
                 store.send(HomeFeature.Action.DrawerGroupBackTapped)
             },
             editGroups = { viewState.groupEditor.request = it },
+            openFollowUp = {
+                selection.clear()
+                viewState.showsFollowUp = true
+            },
         )
     }
     // Inside a group a rightward drag on the list goes back a level on the predictive back's transition.
@@ -332,7 +355,7 @@ fun HomeDrawer(
             },
         )
     }
-    val swipesBack = isDrawerVisible && trayGroup != null && !viewState.showsArchived && !selection.isActive
+    val swipesBack = isDrawerVisible && trayGroup != null && !viewState.showsArchived && !viewState.showsFollowUp && !selection.isActive
     DisposableEffect(viewState.panRegions, groupBackPan, swipesBack) {
         if (swipesBack) viewState.panRegions.groupBack = groupBackPan
         onDispose {
@@ -356,8 +379,9 @@ fun HomeDrawer(
             bottom = controlsHeight.dp + insetBottom + footerBottom + DrawerTunables.bottomGap,
         )
         // TalkBack reads only the Archived page while it covers the list and its title band.
-        val beneathArchived = (if (viewState.showsArchived) Modifier.clearAndSetSemantics {} else Modifier)
+        val beneathArchived = (if (viewState.showsArchived || viewState.showsFollowUp) Modifier.clearAndSetSemantics {} else Modifier)
             .archivedBeneath(archivedTransition, reducedMotion)
+            .archivedBeneath(followUpTransition, reducedMotion)
         // Inbox Sidebar: the sessions as an inbox.
         if (inboxSidebarOn) InboxSidebarList(
             store = store,
@@ -426,6 +450,7 @@ fun HomeDrawer(
                         val (main, overflow) = selectionActions(
                             store, selection, pins = !inboxSidebarOn,
                             groupEditor = viewState.groupEditor.takeIf { !inboxSidebarOn },
+                            snoozeFollowUp = { viewState.followUpSnoozeIDs = it },
                         )
                         DrawerSelectionBar(count = shownCount, onClose = selection::clear, actions = main, overflow = overflow)
                     },
@@ -468,6 +493,45 @@ fun HomeDrawer(
                 null
             },
         )
+
+        if (viewState.showsFollowUp || followUpTransition.isVisible) FollowUpPage(
+            store = store,
+            open = { id ->
+                store.send(HomeFeature.Action.FollowUp(FollowUpAction.RowTapped(id)))
+                viewState.showsFollowUp = false
+                viewState.selectSession(id)
+            },
+            onBack = { viewState.showsFollowUp = false },
+            contentPadding = PaddingValues(top = insetTop + DrawerHeaderTop, bottom = listPadding.calculateBottomPadding()),
+            modifier = Modifier.archivedPage(followUpTransition, reducedMotion).swallowingTouches(),
+        )
+
+        viewState.followUpSnoozeIDs?.let { ids ->
+            FollowUpSnoozeDialog(
+                onSnooze = { snooze ->
+                    viewState.followUpSnoozeIDs = null
+                    store.send(HomeFeature.Action.FollowUp(FollowUpAction.SnoozeTapped(ids, snooze)))
+                },
+                onDismiss = { viewState.followUpSnoozeIDs = null },
+            )
+        }
+
+        OpenCodeNoticePresence(
+            followUpUndo.takeIf { failure == null },
+            Modifier
+                .align(Alignment.BottomStart)
+                .padding(horizontal = DrawerMetrics.rowEdge)
+                .padding(bottom = controlsHeight.dp + insetBottom + footerBottom + 12.dp),
+        ) {
+            OpenCodeNotice(
+                followUpUndoTitle(it),
+                tone = OpenCodeNoticeTone.attention,
+                symbol = if (it.kind == FollowUpUndo.Kind.done) SFSymbol.Checkmark else SFSymbol.Clock,
+                action = stringResource(R.string.drawer_catch_up_undo),
+                modifier = Modifier.testTag("drawer-follow-up-undo"),
+                onClick = { store.send(HomeFeature.Action.FollowUp(FollowUpAction.UndoTapped)) },
+            )
+        }
 
         OpenCodeNoticePresence(
             failure,

@@ -12,6 +12,7 @@ import ai.opencode.core.store.PresentationAction
 import ai.opencode.core.store.Reduced
 import ai.opencode.core.store.Reducer
 import ai.opencode.feature.drawer.catchup.CatchUpFeature
+import ai.opencode.feature.drawer.followup.FollowUps
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
 import ai.opencode.feature.drawer.groups.DrawerPath
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
@@ -170,6 +171,10 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         val groupsByActivity: Boolean = false,
         /** A shared groups change the server refused or couldn't be reached for, shown above New Session for a few seconds. */
         val groupsError: DrawerFailure? = null,
+        /** Mirror of `DrawerSharedKeys.followUps`. */
+        val followUps: FollowUps = FollowUps(),
+        /** The last Done or Snooze, while its Undo shows. */
+        val followUpUndo: FollowUpUndo? = null,
         /** Mirror of `SharedKeys.sidebarShown`: beside a wide window's sidebar, whether it shows. */
         val isSidebarShown: Boolean = true,
         /**
@@ -610,6 +615,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
                     sessionGroups = shared(DrawerSharedKeys.sessionGroups).value,
                     sharedSessionGroups = shared(DrawerSharedKeys.sharedSessionGroups).value,
                     groupsByActivity = shared(DrawerSharedKeys.groupsByActivity).value,
+                    followUps = shared(DrawerSharedKeys.followUps).value,
                     isSidebarShown = shared(SharedKeys.sidebarShown).value,
                     showsWhatsNewButton = WhatsNewFeature.State().showsButton,
                     initializedInboxServerIDs = shared(SharedKeys.initializedInboxServerIDs).value,
@@ -865,6 +871,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         /** Used by playgrounds to swap fixture states in place. */
         data class PlaygroundSetSessionDetail(val detail: SessionFeature.State) : Action
         data class PlaygroundReplaceState(val state: State) : Action
+        data class FollowUp(val action: FollowUpAction) : Action
 
         companion object {
             val catchUpTapped: Action get() = CatchUp(CatchUpFeature.Action.Tapped)
@@ -904,6 +911,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data object LinkedSessionOpen : CancelID
         data class DeleteSession(val sessionID: String) : CancelID
         data class ViewReceipt(val sessionID: String) : CancelID
+        data object FollowUpUndo : CancelID
         data object SessionSearch : CancelID
         data object OlderSessions : CancelID
         data object SharedGroupsRead : CancelID

@@ -152,7 +152,14 @@ fun DrawerListGroupHeaderCell(
     val density = LocalDensity.current
     val key = DrawerPinDrag.ItemKey.GroupHeader(header.id)
     val count = pluralStringResource(R.plurals.drawer_group_session_count, header.count, header.count)
-    val statusText = groupStatusText(header.status)
+    val followUpText = stringResource(R.string.drawer_follow_up_state)
+    val statusText = groupStatusText(header.status).let { status ->
+        when {
+            !header.hasFollowUp || header.status == GroupStatus.followUp -> status
+            status == null -> followUpText
+            else -> "$status, $followUpText"
+        }
+    }
     var menuOpen by remember { mutableStateOf(false) }
     val menuLabel = stringResource(R.string.drawer_selection_more_options_description)
     val currentActions by rememberUpdatedState(actions)
@@ -397,6 +404,7 @@ private fun groupStatusText(status: GroupStatus): String? = when (status) {
     GroupStatus.running -> stringResource(R.string.drawer_row_working_state)
     GroupStatus.failed -> stringResource(R.string.drawer_row_unsent_failed_state)
     GroupStatus.unread -> stringResource(R.string.drawer_row_unread_state)
+    GroupStatus.followUp -> stringResource(R.string.drawer_follow_up_state)
     GroupStatus.none -> null
 }
 
@@ -417,6 +425,7 @@ private fun GroupStatusIndicator(groupID: String, status: GroupStatus, reducedMo
     val ringAlpha by animateFloatAsState(if (status == GroupStatus.running) 1f else 0f, spec, label = "group-ring")
     val dotAlpha by animateFloatAsState(if (status == GroupStatus.attention || status == GroupStatus.unread) 1f else 0f, spec, label = "group-dot")
     val failedAlpha by animateFloatAsState(if (status == GroupStatus.failed) 1f else 0f, spec, label = "group-failed")
+    val followUpAlpha by animateFloatAsState(if (status == GroupStatus.followUp) 1f else 0f, spec, label = "group-follow-up")
     Box(Modifier.size(DrawerListSessionCell.indicatorSize).testTag("drawer-group-status-$groupID"), contentAlignment = Alignment.Center) {
         DrawerListActivityRing(
             isSpinning = status == GroupStatus.running && !reducedMotion,
@@ -437,6 +446,7 @@ private fun GroupStatusIndicator(groupID: String, status: GroupStatus, reducedMo
             tint = colors.danger,
             modifier = Modifier.graphicsLayer { alpha = failedAlpha },
         )
+        FollowUpDot(Modifier.graphicsLayer { alpha = followUpAlpha })
     }
 }
 

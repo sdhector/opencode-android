@@ -90,6 +90,8 @@ class OpenCodeColors(
     val danger: Color,
     /** Needs attention without having failed: a rejected sign-in, a weak connection, a paste that didn't work. */
     val warning: Color,
+    /** Follow Up's outlined dot: a reply read but not handled yet, apart from unread's [signal]. */
+    val followUp: Color,
     private val bodyTextResolver: (Double) -> Color,
 ) {
     /** Prose at [tone] (`0..1`) between canvas and text, mixed in OKLab. */
@@ -169,6 +171,7 @@ class OpenCodeColors(
                 destructive = SystemColors.red(isDark).color,
                 danger = (if (system) SystemColors.red(isDark) else v.diffRemovedText).color,
                 warning = SystemColors.orange(isDark).color,
+                followUp = SystemColors.purple(isDark).color,
                 bodyTextResolver = bodyResolver,
             )
         }
@@ -193,6 +196,7 @@ internal object SystemColors {
     fun red(isDark: Boolean) = if (isDark) ThemeRGBA(1.0, 0.2706, 0.2275) else ThemeRGBA(1.0, 0.2314, 0.1882)
     fun orange(isDark: Boolean) = if (isDark) ThemeRGBA(1.0, 0.6235, 0.0392) else ThemeRGBA(1.0, 0.5843, 0.0)
     fun green(isDark: Boolean) = if (isDark) ThemeRGBA(0.1882, 0.8196, 0.3451) else ThemeRGBA(0.2039, 0.7804, 0.349)
+    fun purple(isDark: Boolean) = if (isDark) ThemeRGBA(0.749, 0.3529, 0.949) else ThemeRGBA(0.6863, 0.3216, 0.8706)
 
     /** `UIColor.tertiarySystemFill`: rgba(118,118,128) at 0.12 light / 0.24 dark. */
     fun tertiarySystemFill(isDark: Boolean) = ThemeRGBA(0.4627, 0.4627, 0.502, if (isDark) 0.24 else 0.12)

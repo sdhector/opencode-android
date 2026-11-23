@@ -297,7 +297,8 @@ data class InboxSidebarRow(
  * The server archived it: mirror `time.archived` until the next snapshot replaces it, read it, so it
  * leaves Catch Up and the unread count, and list it first under Archived.
  */
-internal fun HomeFeature.archiveConfirmed(state: HomeFeature.State, sessionID: String): Reduced<HomeFeature.State, HomeFeature.Action> {
+internal fun HomeFeature.archiveConfirmed(confirmed: HomeFeature.State, sessionID: String): Reduced<HomeFeature.State, HomeFeature.Action> {
+    val state = confirmed.notingFollowUpArchived(sessionID)
     val index = state.sessions.indexOfFirst { it.id == sessionID }
     if (index < 0) return Reduced(state)
     val session = state.sessions[index].copy(archivedMilliseconds = dependency(DateClient).now().toEpochMilli())

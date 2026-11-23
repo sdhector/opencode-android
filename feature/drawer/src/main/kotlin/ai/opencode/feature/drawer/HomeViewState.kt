@@ -59,6 +59,12 @@ class HomeViewState internal constructor(
     /** The drawer shows its Archived page over the list. */
     var showsArchived: Boolean by mutableStateOf(false)
 
+    /** The drawer shows its Follow Up page over the list. */
+    var showsFollowUp: Boolean by mutableStateOf(false)
+
+    /** The chosen sessions Snooze Follow Up asks a time for, from the selection's menu; null while it isn't asking. */
+    var followUpSnoozeIDs: List<String>? by mutableStateOf(null)
+
     /** How far the drawer's list has scrolled beneath its title. */
     val headerScroll = DrawerHeaderScrollState()
 

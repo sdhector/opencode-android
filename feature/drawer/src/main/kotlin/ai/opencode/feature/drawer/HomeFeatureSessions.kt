@@ -115,7 +115,7 @@ internal fun HomeFeature.reduceSessionDetail(state: State, action: SessionFeatur
                 }
                 // The root owns the call even when it targets a pushed subagent.
                 is VoiceFeature.DelegateAction.PromptAdmitted ->
-                    Reduced(state, forwardToSubagents(state, delegate.sessionID, SessionFeature.Action.VoicePromptAdmitted(delegate.sessionID)))
+                    Reduced(state.notingFollowUpReplySent(delegate.sessionID), forwardToSubagents(state, delegate.sessionID, SessionFeature.Action.VoicePromptAdmitted(delegate.sessionID)))
                 is VoiceFeature.DelegateAction.PendingModelApplied -> Reduced(state.notingModel(delegate.model, delegate.sessionID))
                 is VoiceFeature.DelegateAction.ModelSwitched -> {
                     val sessionID = delegate.sessionID ?: return Reduced(state)
@@ -200,8 +200,11 @@ internal fun HomeFeature.reduceSessionDetail(state: State, action: SessionFeatur
             val s = state.learningFirstPrompt(state.sessionDetail?.session?.takeIf { it.id == action.sessionID })
                 .publishingTranscript(action.sessionID, action.items).persistingTranscriptCache(action.sessionID)
                 .syncingSeenItemsFromOpenDetail(action.sessionID)
+                .notingFollowUpFromOpenDetail(action.sessionID, action.items)
             return Reduced(s, prefetchTranscripts(s))
         }
+
+        is SessionFeature.Action.PromptAdmitted -> return Reduced(state.notingFollowUpReplySent(action.sessionID))
 
         is SessionFeature.Action.NewMessagesPassed, is SessionFeature.Action.NewMessagesFit -> {
             val sessionID = state.sessionDetail?.session?.id ?: return Reduced(state)

@@ -182,7 +182,9 @@ fun DrawerListSessionCell(
     val previousID = remember { arrayOf(row.session.id) }
     val animateStatus = previousID[0] == row.session.id
     previousID[0] = row.session.id
-    val statusPhase = if (hasStatus) MotionPhase.Enter else MotionPhase.Exit
+    // Follow Up is read but not handled: its outline shows only where no native status does, and never bolds the title.
+    val showsFollowUp = row.followUp && !hasStatus
+    val statusPhase = if (hasStatus || showsFollowUp) MotionPhase.Enter else MotionPhase.Exit
     val statusSpec = if (animateStatus) MotionRole.MicroIn.animation<Float>(statusPhase, row.reducedMotion) else snap()
     val ringAlpha by animateFloatAsState(if (row.indicator == Indicator.running) 1f else 0f, statusSpec, label = "ring")
     val dotAlpha by animateFloatAsState(
@@ -191,9 +193,10 @@ fun DrawerListSessionCell(
         label = "dot",
     )
     val failedAlpha by animateFloatAsState(if (failed) 1f else 0f, statusSpec, label = "failed")
+    val followUpAlpha by animateFloatAsState(if (showsFollowUp) 1f else 0f, statusSpec, label = "follow-up")
     // The title makes room for the status on the indicator's own spring.
     val statusInset by animateDpAsState(
-        if (!hasStatus) 0.dp else DrawerListSessionCell.indicatorSize + DrawerTunables.statusGap,
+        if (!hasStatus && !showsFollowUp) 0.dp else DrawerListSessionCell.indicatorSize + DrawerTunables.statusGap,
         if (animateStatus && !row.reducedMotion) MotionRole.MicroIn.animation() else snap(),
         label = "status-inset",
     )
@@ -419,6 +422,7 @@ fun DrawerListSessionCell(
                         tint = colors.danger,
                         modifier = Modifier.graphicsLayer { alpha = failedAlpha },
                     )
+                    FollowUpDot(Modifier.graphicsLayer { alpha = followUpAlpha })
                 }
             }
         }

@@ -238,6 +238,32 @@
     </plurals>
     <string name="drawer_date_yesterday">Yesterday</string>
 
+    <!-- Follow Up: replies read on this phone and not handled yet -->
+    <string name="drawer_follow_up">Follow Up</string>
+    <string name="drawer_follow_up_state">Follow Up</string>
+    <string name="drawer_follow_up_empty">Nothing to Follow Up</string>
+    <string name="drawer_follow_up_snoozed">Snoozed</string>
+    <string name="drawer_follow_up_mark_done">Mark Done</string>
+    <string name="drawer_follow_up_snooze">Snooze</string>
+    <string name="drawer_follow_up_snooze_follow_up">Snooze Follow Up</string>
+    <string name="drawer_follow_up_snooze_tomorrow">Tomorrow at 9:00</string>
+    <string name="drawer_follow_up_snooze_next_week">In a Week</string>
+    <string name="drawer_follow_up_snooze_pick_date">Pick a Date…</string>
+    <string name="drawer_follow_up_change_date">Change Date</string>
+    <string name="drawer_follow_up_bring_back">Bring Back Now</string>
+    <string name="drawer_follow_up_until">Until %1$s</string>
+    <string name="drawer_follow_up_loading_title">Loading Session…</string>
+    <string name="drawer_follow_up_done_notice">Marked Done</string>
+    <string name="drawer_follow_up_snoozed_notice">Snoozed until %1$s</string>
+    <plurals name="drawer_follow_up_done_sessions_notice">
+        <item quantity="one">%1$d Session Marked Done</item>
+        <item quantity="other">%1$d Sessions Marked Done</item>
+    </plurals>
+    <plurals name="drawer_follow_up_snoozed_sessions_notice">
+        <item quantity="one">%1$d Session Snoozed until %2$s</item>
+        <item quantity="other">%1$d Sessions Snoozed until %2$s</item>
+    </plurals>
+
     <!-- Appearance settings transcript preview -->
     <string name="drawer_appearance_preview_user_text">Help me improve the session screen. Show me what you find and explain the changes.</string>
     <string name="drawer_appearance_preview_assistant_text">I found the layout issue in `SessionView.swift`. The transcript and composer share the available height, so the keyboard is a useful stress test.</string>

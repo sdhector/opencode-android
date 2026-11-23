@@ -216,4 +216,10 @@ object DrawerSharedKeys {
 
     /** This device orders groups by their newest activity instead of their saved order; never written to a server. */
     val groupsByActivity = SharedKey.appStorage("drawer-groups-by-activity", false)
+
+    /** Follow Up's records, server-scoped like pins (`followup/FollowUps.kt`). */
+    val followUps = SharedKey.fileStorage(FileDirectory.Documents, "follow-ups.json", ai.opencode.feature.drawer.followup.FollowUps())
+
+    /** Follow Up's watches of the roots on screen this run (`HomeFeatureFollowUp.kt`). In memory only. */
+    val followUpWatches = SharedKey.inMemory<Map<String, ai.opencode.feature.drawer.FollowUpWatch>>("follow-up-watches", emptyMap())
 }

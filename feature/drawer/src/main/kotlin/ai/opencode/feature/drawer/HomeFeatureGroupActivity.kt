@@ -13,11 +13,13 @@ import ai.opencode.feature.drawer.groups.SessionGroup
  * history and never light a row.
  */
 
-/** A group's rolled-up status, in the drawer's precedence: attention, running, a failed send, unread. */
-enum class GroupStatus { attention, running, failed, unread, none }
+/** A group's rolled-up status, in the drawer's precedence: attention, running, a failed send, unread, Follow Up. */
+enum class GroupStatus { attention, running, failed, unread, followUp, none }
 
 data class GroupRollup(
     val status: GroupStatus = GroupStatus.none,
+    /** Some member has a pending follow-up, whatever [status] shows. */
+    val hasFollowUp: Boolean = false,
     /** The newest native `time.updated` seen among the members (epoch ms), or null when none was seen. */
     val lastActivity: Long? = null,
     /** [lastActivity] covers every member: none can be newer unseen. */
@@ -50,11 +52,14 @@ fun State.groupRollups(): Map<String, GroupRollup> {
     val statuses = HashMap<String, GroupStatus>()
     val newest = HashMap<String, Long>()
     val known = HashSet<String>(recentlyDeletedIDs)
+    val followUpIDs = pendingFollowUpIDs
+    val followingUp = HashSet<String>()
 
-    fun credit(groupID: String, groupStatus: GroupStatus, at: Long?) {
+    fun credit(groupID: String, groupStatus: GroupStatus, at: Long?, followUp: Boolean = false) {
         for (id in listOfNotNull(groupID, parents[groupID])) {
             if (groupStatus.outranks(statuses[id] ?: GroupStatus.none)) statuses[id] = groupStatus
             if (at != null && at > (newest[id] ?: Long.MIN_VALUE)) newest[id] = at
+            if (followUp) followingUp += id
         }
     }
 
@@ -62,7 +67,10 @@ fun State.groupRollups(): Map<String, GroupRollup> {
         val groupID = membership[session.id] ?: continue
         known += session.id
         if (session.isArchived || session.id in archiving) continue
-        credit(groupID, status.indicator(session).groupStatus(), session.updatedAt.toEpochMilli())
+        val followUp = session.id in followUpIDs
+        val native = status.indicator(session).groupStatus()
+        val shown = if (native == GroupStatus.none && followUp) GroupStatus.followUp else native
+        credit(groupID, shown, session.updatedAt.toEpochMilli(), followUp)
     }
     for (draft in unsentDrafts) {
         val groupID = membership[draft.sessionID] ?: continue
@@ -82,6 +90,7 @@ fun State.groupRollups(): Map<String, GroupRollup> {
         val remote = entry?.lastActivityAt
         rollups[group.id] = GroupRollup(
             status = statuses[group.id] ?: GroupStatus.none,
+            hasFollowUp = group.id in followingUp,
             lastActivity = if (local == null) remote else if (remote == null) local else maxOf(local, remote),
             activityComplete = members.all { it in known } || (summaryIsCurrent && entry?.complete == true),
         )

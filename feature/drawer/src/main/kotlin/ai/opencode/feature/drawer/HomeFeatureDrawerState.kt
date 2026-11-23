@@ -652,6 +652,7 @@ fun HomeFeature.State.purgingSession(sessionID: String): HomeFeature.State {
         .updatingMutedSessionKeys { it - key }
         .updatingHiddenSessionKeys { it - key }
         .updatingSessionGroups { it.forgetting(serverID, sessionID) }
+        .forgettingFollowUp(sessionID)
     if (s.lastViewedSessionIDs[serverID] == sessionID) s = s.updatingLastViewedSessionIDs { it - serverID }
     return s
 }

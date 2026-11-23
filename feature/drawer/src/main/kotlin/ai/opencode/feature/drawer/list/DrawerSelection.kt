@@ -26,6 +26,7 @@ import ai.opencode.feature.drawer.isPinned
 import ai.opencode.feature.drawer.groupID
 import ai.opencode.feature.drawer.isUnread
 import ai.opencode.feature.drawer.visibleSessions
+import ai.opencode.feature.drawer.openFollowUps
 import ai.opencode.feature.system.SessionWindowTarget
 import ai.opencode.feature.system.WindowsClient
 import androidx.compose.animation.core.Animatable
@@ -195,6 +196,7 @@ internal fun selectionActions(
     selection: DrawerSelection,
     pins: Boolean,
     groupEditor: DrawerGroupEditor? = null,
+    snoozeFollowUp: ((List<String>) -> Unit)? = null,
 ): Pair<List<DrawerRowMenuItem>, List<DrawerRowMenuItem>> {
     val state = store.state
     val ids = selection.ids.toList()
@@ -283,6 +285,15 @@ internal fun selectionActions(
                 },
             )
         }
+    }
+    val followingUp = state.openFollowUps.keys
+    if (snoozeFollowUp != null && sessions.any { it.id in followingUp }) {
+        overflow.add(
+            DrawerRowMenuItem(localized(R.string.drawer_follow_up_snooze_follow_up), SFSymbol.Clock) {
+                snoozeFollowUp(sessions.map { it.id }.filter { it in followingUp })
+                selection.clear()
+            },
+        )
     }
     val windows = dependency(WindowsClient)
     if (ids.size == 1 && windows.isAvailable()) {

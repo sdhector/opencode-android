@@ -95,6 +95,7 @@ class DrawerListActions(
     /** The group title's back button: the list goes up a level. */
     val groupBack: () -> Unit,
     val editGroups: (DrawerGroupEditor.Request) -> Unit,
+    val openFollowUp: () -> Unit = {},
 )
 
 @Stable
@@ -493,6 +494,7 @@ fun DrawerListView(
                         returnFocus = returnFocus.takeIf { item == DrawerListItem.CatchUp },
                     )
                     DrawerListItem.Archived -> ArchivedEntryRow(current.archivedCount, regularList = true, onClick = { currentActions.openArchived() })
+                    DrawerListItem.FollowUp -> FollowUpEntryRow(current.shortcuts.followUpCount, onClick = { currentActions.openFollowUp() })
                     is DrawerListItem.GroupHeader -> {
                         val header = current.groupHeaders[item.groupID] ?: return@itemsIndexed
                         val groupActions = remember(header.id, header.name, header.hasSubgroups) {
@@ -680,7 +682,7 @@ private fun stabilized(previous: DrawerListModel, next: DrawerListModel): Drawer
 }
 
 private fun contentType(item: DrawerListItem): Int = when (item) {
-    DrawerListItem.CatchUp, DrawerListItem.WhatsNew, DrawerListItem.Archived -> 0
+    DrawerListItem.CatchUp, DrawerListItem.WhatsNew, DrawerListItem.Archived, DrawerListItem.FollowUp -> 0
     is DrawerListItem.Header -> 2
     is DrawerListItem.GroupHeader -> 8
     is DrawerListItem.GroupTitle -> 11

@@ -21,6 +21,7 @@ import ai.opencode.server.OpenCodeServerEvent
 internal fun HomeFeature.core(state: State, action: Action): Reduced<State, Action> {
     val reduced = coreRoute(state, action)
     var s = reduced.state.absorbingSharedDrafts().resolvingDraftGroup().resolvingDrawerPath()
+    if (action == Action.SceneBecameActive || action == Action.catchUpTapped) s = s.wakingDueFollowUps()
     val persists = when (action) {
         is Action.SnapshotRefreshed, is Action.DeleteSessionConfirmed, is Action.DeleteSessionResponse,
         Action.TranscriptCacheFlushRequested -> true
@@ -232,6 +233,8 @@ private fun HomeFeature.coreRoute(state: State, action: Action): Reduced<State, 
         if (!action.shows) s = s.copy(isDrawerOpen = false)
         Reduced(s)
     }
+
+    is Action.FollowUp -> reduceFollowUp(state, action.action)
 
     is Action.WhatsNew -> reduceWhatsNew(state, action.action)
     is Action.SettingsScreen -> reduceSettingsScreen(state, action.action)
