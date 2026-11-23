@@ -29,6 +29,7 @@ import ai.opencode.server.OpenCodeServer
 import ai.opencode.server.model.OpenCodeRpcError
 import ai.opencode.server.model.OpenCodeSessionGroupsCapabilities
 import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
+import ai.opencode.server.model.OpenCodeSessionGroupsWrite
 import kotlin.time.Duration.Companion.seconds
 
 /*
@@ -59,8 +60,16 @@ val State.shownGroups: SessionGroups
 fun State.canEditGroups(method: String): Boolean {
     if (sharedGroups == null) return true
     if (method == "create" || method == "assign") return true
-    return groupSync.capabilities?.supports(method) == true
+    val capabilities = groupSync.capabilities ?: return false
+    return capabilities.supportsHierarchy || capabilities.supports(method)
 }
+
+/**
+ * Whether groups can hold subgroups here: always on the phone; on a shared server only once its plugin
+ * reports the hierarchy contract. A legacy server's groups stay one level.
+ */
+val State.supportsSubgroups: Boolean
+    get() = sharedGroups == null || groupSync.capabilities?.supportsHierarchy == true
 
 /** What the drawer's sharing menu offers; null keeps the group section as it was (no plugin, never shared). */
 data class GroupSharingStatus(val isShared: Boolean, val isOffline: Boolean, val canImport: Boolean)
@@ -188,6 +197,7 @@ internal fun HomeFeature.reduceSharedGroups(state: State, action: Action): HomeR
                     Effect.cancel(HomeFeature.CancelID.SharedGroupsWrite),
                     Effect.cancel(HomeFeature.CancelID.SharedGroupsPoll),
                     Effect.cancel(HomeFeature.CancelID.SharedGroupsImport),
+                    Effect.cancel(HomeFeature.CancelID.SharedGroupsSummary),
                 ),
             )
         }
@@ -219,6 +229,11 @@ internal fun HomeFeature.reduceSharedGroups(state: State, action: Action): HomeR
             if (s.sharedGroups == null || !s.isDrawerOpen || !s.isConnected) return Reduced(s)
             if (s.groupSync.isReading || s.groupSync.isWriting || s.groupSync.queue.isNotEmpty()) return Reduced(s)
             return readingGroups(s)
+        }
+
+        is Action.SharedGroupsSummaryRead -> {
+            if (action.serverID != serverID) return Reduced(state)
+            return summaryFinished(state, action)
         }
 
         Action.ClearGroupsError -> return Reduced(state.copy(groupsError = null))
@@ -327,8 +342,9 @@ internal suspend fun readSharedGroups(
             capabilitiesMissing = true
         }
     }
+    val hierarchy = capabilities?.supportsHierarchy == true
     val snapshot = try {
-        whilePluginLoads(clock) { client.sessionGroups(server) }
+        whilePluginLoads(clock) { if (hierarchy) client.sessionGroupsHierarchy(server) else client.sessionGroups(server) }
     } catch (error: OpenCodeClientError) {
         if (capabilitiesMissing && error.isMissingRoute) return SharedGroupsReadResult(GroupSync.Support.Unavailable)
         val support = capabilities?.let { GroupSync.Support.Available(it) } ?: GroupSync.Support.Unknown
@@ -347,7 +363,7 @@ private fun readFinished(state: State, read: SharedGroupsReadResult): State {
     val shared = s.sharedGroups
     if (snapshot != null) {
         if (shared != null) s = s.updatingShared { it.applying(snapshot) }
-        s = s.withSync { it.copy(isOffline = false, needsRead = false) }
+        s = s.withSync { it.copy(isOffline = false, needsRead = false, summaryDue = true) }
     } else if (shared != null) {
         AppLog.app.notice { "Shared groups: read failed (${read.error?.logSummary ?: "no plugin"}); keeping revision ${shared.revision}" }
         s = s.withSync { it.copy(isOffline = true) }
@@ -381,15 +397,17 @@ internal fun HomeFeature.drainingGroupWrites(state: State): HomeReduced {
     if (sync.needsRead || capabilities == null) return readingGroups(s)
     val serverID = s.server.persistenceID
     val current = SessionGroups(mapOf(serverID to shared.groups))
+    val hierarchy = capabilities.supportsHierarchy
     var queue = sync.queue
     while (queue.isNotEmpty()) {
         val head = queue.first()
-        val write = head.edit.write(current, serverID)
+        val write = head.edit.write(current, serverID, hierarchy)
         if (write == null) {
             queue = queue.drop(1)
             continue
         }
-        if (write.method != "create" && write.method != "assign" && !capabilities.supports(write.method)) {
+        val supported = write is OpenCodeSessionGroupsWrite.Hierarchy || write.method == "create" || write.method == "assign" || capabilities.supports(write.method)
+        if (!supported) {
             AppLog.app.notice { "Shared groups: ${write.method} unsupported; dropped" }
             queue = queue.drop(1)
             continue
@@ -397,7 +415,7 @@ internal fun HomeFeature.drainingGroupWrites(state: State): HomeReduced {
         s = s.withSync { it.copy(queue = queue, isWriting = true) }
         val server = s.server
         val revision = shared.revision
-        val operationID = if (capabilities.operationIDs) head.operationID else null
+        val operationID = if (capabilities.operationIDs || write is OpenCodeSessionGroupsWrite.Hierarchy) head.operationID else null
         val client = dependency(OpenCodeClient)
         return Reduced(
             s,
@@ -444,6 +462,12 @@ private fun HomeFeature.writeFinished(state: State, action: Action.SharedGroupsW
                 val collapsed = s.sessionGroups.groups(serverID).filter { it.isCollapsed && it.id in ids }.map { it.id }
                 if (collapsed.isNotEmpty()) s = s.updatingShared { it.copy(collapsedIDs = it.collapsedIDs + collapsed) }
                 dependency(HapticsClient).play(Haptic.success)
+                if (s.groupSync.capabilities?.supportsHierarchy == true) {
+                    // The import's answer is the flat shape: read the hierarchy, then link the subgroups it carried.
+                    val links = edit.pending.groups.filter { it.parentID != null && it.id in ids }
+                    s = s.editingGroups(links.map { GroupEdit.Reparent(it.id, it.parentID) })
+                    return readingGroups(s.withSync { it.copy(needsRead = true) })
+                }
             }
             else -> Unit
         }
@@ -514,7 +538,7 @@ private fun droppingDependents(state: State, edit: GroupEdit): State {
     if (edit !is GroupEdit.Create) return state
     val id = edit.groupID
     return state.withSync { sync ->
-        sync.copy(queue = sync.queue.filter { it.edit.dependsOnGroup != id }, waiting = sync.waiting.filter { it.edit.dependsOnGroup != id })
+        sync.copy(queue = sync.queue.filterNot { it.edit.dependsOn(id) }, waiting = sync.waiting.filterNot { it.edit.dependsOn(id) })
     }
 }
 
@@ -553,7 +577,7 @@ private fun HomeFeature.importingLocalGroups(state: State): HomeReduced {
     val seen = HashSet<String>()
     val groups = state.sessionGroups.groups(serverID).mapNotNull { group ->
         val name = SessionGroups.normalizedName(group.name) ?: return@mapNotNull null
-        SessionGroup(id = group.id, name = name, sessionIDs = group.sessionIDs.filter { seen.add(it) })
+        SessionGroup(id = group.id, name = name, sessionIDs = group.sessionIDs.filter { seen.add(it) }, parentID = group.parentID)
     }
     if (groups.isEmpty()) return Reduced(state)
     val listed = state.sessions.mapTo(HashSet()) { it.id }
@@ -578,3 +602,55 @@ private fun HomeFeature.importingLocalGroups(state: State): HomeReduced {
 
 /** Sessions outside the loaded list looked up before an import; past this the import sends them as they are. */
 private const val importLookupLimit = 50
+
+/**
+ * Asks a shared hierarchy server for its activity summary while the drawer orders groups by Last
+ * Activity: once the groups are settled (nothing read or written in flight), after a refresh read them
+ * again, or when the snapshot reaches a revision not yet asked about. Runs after every action.
+ */
+internal fun HomeFeature.readingGroupSummaryIfDue(state: State): HomeReduced {
+    if (!state.groupsByActivity || !state.isConnected) return Reduced(state)
+    val shared = state.sharedGroups ?: return Reduced(state)
+    val sync = state.groupSync
+    if (sync.capabilities?.supportsHierarchy != true) return Reduced(state)
+    if (sync.isReadingSummary || sync.isReading || sync.isWriting || sync.needsRead || sync.queue.isNotEmpty()) return Reduced(state)
+    if (!sync.summaryDue && sync.summaryAskedRevision == shared.revision) return Reduced(state)
+    val request = sync.summaryRequest + 1
+    val server = state.server
+    val client = dependency(OpenCodeClient)
+    val s = state.withSync {
+        it.copy(summaryRequest = request, isReadingSummary = true, summaryDue = false, summaryAskedRevision = shared.revision)
+    }
+    return Reduced(
+        s,
+        Effect.run<Action> { send ->
+            val result = try {
+                Action.SharedGroupsSummaryRead(server.persistenceID, request, summary = client.sessionGroupsSummary(server))
+            } catch (error: OpenCodeClientError) {
+                Action.SharedGroupsSummaryRead(server.persistenceID, request, error = error)
+            }
+            send(result)
+        }.cancellable(HomeFeature.CancelID.SharedGroupsSummary),
+    )
+}
+
+/**
+ * Keeps a summary only for the revision the drawer shows. A newer one means the groups changed: they
+ * are read again, which asks again. Anything else leaves the last verified summary in place, marked stale.
+ */
+private fun HomeFeature.summaryFinished(state: State, action: Action.SharedGroupsSummaryRead): HomeReduced {
+    if (action.request != state.groupSync.summaryRequest || !state.groupSync.isReadingSummary) return Reduced(state)
+    val s = state.withSync { it.copy(isReadingSummary = false) }
+    val shared = s.sharedGroups ?: return Reduced(s)
+    val summary = action.summary
+    if (summary == null) {
+        AppLog.app.notice { "Shared groups: summary failed (${action.error?.logSummary}); keeping revision ${shared.summary?.revision}" }
+        return Reduced(s.withSync { it.copy(summaryFailed = true) })
+    }
+    return when {
+        summary.revision == shared.revision ->
+            Reduced(s.updatingShared { it.copy(summary = summary) }.withSync { it.copy(summaryFailed = false) })
+        summary.revision > shared.revision -> readingGroups(s.withSync { it.copy(summaryFailed = true) })
+        else -> Reduced(s.withSync { it.copy(summaryFailed = true) })
+    }
+}

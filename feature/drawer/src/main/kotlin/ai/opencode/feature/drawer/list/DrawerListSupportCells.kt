@@ -90,10 +90,14 @@ import kotlin.math.roundToInt
  * no sessions / no results, and a failed deletion. They are plain items of the same `LazyColumn`.
  */
 
-/** Pinned or Recents, as a header row or a gap or hairline between sections. */
+/** Pinned or Recents (Ungrouped while the server has groups), as a header row or a gap or hairline between sections. */
 @Composable
-fun DrawerListHeaderCell(kind: DrawerSectionHeaderKind, pinDrag: DrawerPinDrag, modifier: Modifier = Modifier) {
-    val title = if (kind == DrawerSectionHeaderKind.Pinned) stringResource(R.string.drawer_section_pinned) else stringResource(R.string.drawer_section_recents)
+fun DrawerListHeaderCell(kind: DrawerSectionHeaderKind, pinDrag: DrawerPinDrag, modifier: Modifier = Modifier, ungrouped: Boolean = false) {
+    val title = when {
+        kind == DrawerSectionHeaderKind.Pinned -> stringResource(R.string.drawer_section_pinned)
+        ungrouped -> stringResource(R.string.drawer_section_ungrouped)
+        else -> stringResource(R.string.drawer_section_recents)
+    }
     val key = if (kind == DrawerSectionHeaderKind.Pinned) DrawerPinDrag.ItemKey.PinnedHeader else DrawerPinDrag.ItemKey.RecentsHeader
     val density = LocalDensity.current
     val tag = if (kind == DrawerSectionHeaderKind.Pinned) "drawer-section-pinned" else "drawer-section-recents"

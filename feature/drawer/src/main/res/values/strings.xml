@@ -52,6 +52,18 @@
     <string name="drawer_group_remove_message">Its sessions stay as they are and return to Recents. Nothing changes on the server.</string>
     <string name="drawer_group_move">Move to Group</string>
     <string name="drawer_group_remove_from">Remove from Group</string>
+    <string name="drawer_group_path">%1$s › %2$s</string>
+    <string name="drawer_group_new_subgroup">New Subgroup</string>
+    <string name="drawer_group_move_to">Move Group</string>
+    <string name="drawer_group_move_to_title">Move “%1$s” To</string>
+    <string name="drawer_group_top_level">Top Level</string>
+    <string name="drawer_group_remove_parent_message">Move or remove this group’s subgroups before removing it.</string>
+    <string name="drawer_groups_sort">Sort Groups</string>
+    <string name="drawer_groups_sort_manual">Manual</string>
+    <string name="drawer_groups_sort_activity">Last Activity</string>
+    <string name="drawer_groups_activity_loaded_only">Based on the sessions loaded on this phone</string>
+    <string name="drawer_groups_activity_partial">Some groups have older sessions the computer didn’t check</string>
+    <string name="drawer_groups_activity_stale">Showing the computer’s last activity check</string>
     <string name="drawer_group_new_session">New Session in “%1$s”</string>
     <string name="drawer_drop_to_recents">Drop to Move to Recents</string>
     <plurals name="drawer_group_session_count">
@@ -103,6 +115,7 @@
     <!-- Section headers, shortcut rows and list footer -->
     <string name="drawer_section_pinned">Pinned</string>
     <string name="drawer_section_recents">Recents</string>
+    <string name="drawer_section_ungrouped">Ungrouped</string>
     <plurals name="drawer_catch_up_session_count">
         <item quantity="one">%1$d session</item>
         <item quantity="other">%1$d sessions</item>

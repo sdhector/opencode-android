@@ -10,6 +10,7 @@ import ai.opencode.feature.composer.ComposerPersistence
 import ai.opencode.feature.drawer.HomeFeature.Action
 import ai.opencode.feature.drawer.HomeFeature.State
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
+import ai.opencode.feature.drawer.groups.DrawerPath
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
 import ai.opencode.feature.drawer.groups.GroupEdit
 import ai.opencode.feature.drawer.groups.SessionGroup
@@ -29,8 +30,8 @@ internal fun State.updatingSessionGroups(transform: (SessionGroups) -> SessionGr
     return if (live == sessionGroups) this else copy(sessionGroups = live)
 }
 
-/** This server's groups, in the order the drawer shows them. */
-val State.serverGroups: List<SessionGroup> get() = shownGroups.groups(server.persistenceID)
+/** This server's groups in their saved order, each root followed by its subgroups. */
+val State.serverGroups: List<SessionGroup> get() = shownGroups.tree(server.persistenceID)
 
 fun State.groupID(sessionID: String): String? = shownGroups.groupID(server.persistenceID, sessionID)
 
@@ -44,12 +45,37 @@ val State.openGroup: SessionGroup?
 /** The group whose sessions the drawer's list shows: [openGroup], except while searching, which lists every match. */
 val State.shownDrawerGroup: SessionGroup? get() = if (search.isEmpty()) openGroup else null
 
-/** Drops the path's levels whose group is gone (removed, or no longer on a shared server); runs after every action. */
+/** One group in Move to Group's list: subgroups under their root, named by [path] where a name repeats. */
+data class GroupPickerEntry(val id: String, val name: String, val isSubgroup: Boolean)
+
+fun State.groupPickerEntries(path: (parent: String, name: String) -> String): List<GroupPickerEntry> {
+    val serverID = server.persistenceID
+    val shown = shownGroups
+    val parents = shown.parents(serverID)
+    return shown.tree(serverID).map { GroupPickerEntry(it.id, shown.displayName(serverID, it.id, path = path), it.id in parents) }
+}
+
+/** Move Group's choices for [groupID]: each parent's ID and name, the top level first as null. */
+fun State.groupMoveTargets(groupID: String): List<Pair<String?, String?>> {
+    if (!supportsSubgroups) return emptyList()
+    val serverID = server.persistenceID
+    val shown = shownGroups
+    return shown.moveTargets(serverID, groupID).map { parentID -> parentID to parentID?.let { shown.group(serverID, it)?.name } }
+}
+
+/** Groups can be put in a new order by hand: the server allows it and the drawer shows the saved order. */
+val State.canReorderGroups: Boolean get() = canEditGroups("reorder") && !groupsByActivity
+
+/**
+ * Keeps the path on groups that exist, each under the parent it has now: a gone group ends the path at
+ * the deepest level still there, and a moved one follows its new parent. Runs after every action.
+ */
 internal fun State.resolvingDrawerPath(): State {
     if (drawerPath.isRoot) return this
     val shown = shownGroups
     val serverID = server.persistenceID
-    val resolved = drawerPath.resolved { shown.group(serverID, it) != null }
+    val last = drawerPath.groupIDs.lastOrNull { shown.group(serverID, it) != null }
+    val resolved = if (last == null) DrawerPath() else DrawerPath(shown.chain(serverID, last))
     return if (resolved == drawerPath) this else copy(drawerPath = resolved)
 }
 
@@ -71,19 +97,39 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
         }
 
         is Action.DrawerGroupOpened -> {
-            if (state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
-            return Reduced(state.copy(drawerPath = state.drawerPath.opening(action.groupID)))
+            val chain = state.shownGroups.chain(serverID, action.groupID)
+            if (chain.isEmpty()) return Reduced(state)
+            return Reduced(state.copy(drawerPath = DrawerPath(chain)))
         }
 
         Action.DrawerGroupBackTapped -> return Reduced(state.copy(drawerPath = state.drawerPath.back()))
 
         is Action.CreateGroup -> {
             if (SessionGroups.normalizedName(action.name) == null) return Reduced(state)
+            val parentID = action.parentID
+            if (parentID != null) {
+                val shown = state.shownGroups
+                if (!state.supportsSubgroups || shown.group(serverID, parentID) == null || shown.parentID(serverID, parentID) != null) return Reduced(state)
+            }
             haptics.play(Haptic.confirm)
             val groupID = "grp_" + dependency(UuidClient).next()
             val members = movableIDs(state, action.sessionIDs)
             val s = members.fold(state) { acc, id -> acc.adoptingSearchResult(id) }
-            return Reduced(s.editingGroups(listOf(GroupEdit.Create(groupID, action.name)) + members.map { GroupEdit.Assign(it, groupID) }))
+            return Reduced(s.editingGroups(listOf(GroupEdit.Create(groupID, action.name, parentID)) + members.map { GroupEdit.Assign(it, groupID) }))
+        }
+
+        is Action.MoveGroupToParent -> {
+            if (!state.supportsSubgroups || action.parentID !in state.shownGroups.moveTargets(serverID, action.groupID)) return Reduced(state)
+            haptics.play(Haptic.selection)
+            return Reduced(state.editingGroups(GroupEdit.Reparent(action.groupID, action.parentID)))
+        }
+
+        is Action.GroupSortChanged -> {
+            if (action.byActivity == state.groupsByActivity) return Reduced(state)
+            haptics.play(Haptic.selection)
+            shared(DrawerSharedKeys.groupsByActivity).set(action.byActivity)
+            val s = state.copy(groupsByActivity = action.byActivity)
+            return Reduced(if (action.byActivity) s.copy(groupSync = s.groupSync.copy(summaryDue = true)) else s)
         }
 
         is Action.RenameGroup -> {
@@ -94,6 +140,7 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
 
         is Action.RemoveGroup -> {
             if (!state.canEditGroups("remove") || state.shownGroups.group(serverID, action.groupID) == null) return Reduced(state)
+            if (state.shownGroups.hasChildren(serverID, action.groupID)) return Reduced(state)
             haptics.play(Haptic.confirm)
             var s = state.editingGroups(GroupEdit.Remove(action.groupID))
             if (s.draftGroup?.groupID == action.groupID) s = s.copy(draftGroup = null)
@@ -126,19 +173,27 @@ internal fun HomeFeature.reduceGroups(state: State, action: Action): HomeReduced
     }
 }
 
+/** [groupID]'s siblings in their saved order: the roots, or its parent's subgroups. */
+private fun State.siblingsOf(groupID: String): List<SessionGroup> {
+    val serverID = server.persistenceID
+    val shown = shownGroups
+    return shown.siblings(serverID, shown.parentID(serverID, groupID))
+}
+
 private fun willMoveGroup(state: State, groupID: String, index: Int): Boolean {
-    if (!state.canEditGroups("reorder")) return false
-    val groups = state.serverGroups
-    val from = groups.indexOfFirst { it.id == groupID }
-    return from >= 0 && index.coerceIn(0, groups.size - 1) != from
+    if (!state.canReorderGroups) return false
+    val siblings = state.siblingsOf(groupID)
+    val from = siblings.indexOfFirst { it.id == groupID }
+    return from >= 0 && index.coerceIn(0, siblings.size - 1) != from
 }
 
 private fun movingGroup(state: State, groupID: String, index: (Int) -> Int): State {
-    if (!state.canEditGroups("reorder")) return state
-    val from = state.serverGroups.indexOfFirst { it.id == groupID }
+    if (!state.canReorderGroups) return state
+    val siblings = state.siblingsOf(groupID)
+    val from = siblings.indexOfFirst { it.id == groupID }
     if (from < 0) return state
     val to = index(from)
-    if (to !in state.serverGroups.indices) return state
+    if (to !in siblings.indices) return state
     dependency(HapticsClient).play(Haptic.selection)
     return state.editingGroups(GroupEdit.Move(groupID, to))
 }

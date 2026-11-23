@@ -15,6 +15,8 @@ import ai.opencode.server.model.OpenCodeShell
 import ai.opencode.server.model.OpenCodeShellOutputPage
 import ai.opencode.server.model.OpenCodeRpcError
 import ai.opencode.server.model.OpenCodeSessionGroup
+import ai.opencode.server.model.OpenCodeSessionGroupOutcomes
+import ai.opencode.server.model.OpenCodeSessionGroupSummary
 import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
 import ai.opencode.server.model.OpenCodeSessionGroupsWrite
 import ai.opencode.server.model.PromptContext
@@ -680,6 +682,114 @@ class WireRequestTests {
         }
         withFixture(WireFixture { Reply.Json(400, """{"_tag":"Other","type":"x"}""") }) { fixture ->
             assertNull(expectClientError { OpenCodeClient.liveValue.sessionGroups(fixture.server) }.rpcError)
+        }
+    }
+
+    @Test
+    fun sessionGroupsHierarchyReadsTheContractsShapes() = runTest {
+        val fixture = WireFixture { request ->
+            when (request.path) {
+                "/api/rpc/session-groups/capabilities" -> Reply.Json(
+                    200,
+                    """{"output":{"apiVersion":2,"hierarchyVersion":1,"operationIDs":true,"mutations":["create","assign","reorder","rename","remove","import"]}}""",
+                )
+                "/api/rpc/session-groups/hierarchyList" -> Reply.Json(
+                    200,
+                    """{"output":{"revision":5,"groups":[{"id":"group_papers","name":"Papers","sessionIDs":[],"parentID":"reading"},""" +
+                        """{"id":"reading","name":"Reading","sessionIDs":["ses_root"],"parentID":null}]}}""",
+                )
+                else -> Reply.Json(
+                    200,
+                    """{"output":{"revision":9,"groups":[{"groupID":"reading","lastActivityAt":200,"memberCount":2,"observedNonArchivedCount":2,"complete":true,""" +
+                        """"lastExecutionOutcomes":{"succeeded":1,"failed":0,"interrupted":0,"unreported":1}},""" +
+                        """{"groupID":"group_notes","lastActivityAt":null,"memberCount":1,"observedNonArchivedCount":0,"complete":false,""" +
+                        """"lastExecutionOutcomes":{"succeeded":0,"failed":0,"interrupted":0,"unreported":0}}]}}""",
+                )
+            }
+        }
+        withFixture(fixture) {
+            val client = OpenCodeClient.liveValue
+            val capabilities = client.sessionGroupsCapabilities(it.server)
+            assertEquals(1, capabilities.hierarchyVersion)
+            assertTrue(capabilities.supportsHierarchy)
+
+            assertEquals(
+                "a child can come before its parent; both keep their parentID",
+                OpenCodeSessionGroupsSnapshot(
+                    5,
+                    listOf(
+                        OpenCodeSessionGroup("group_papers", "Papers", emptyList(), parentID = "reading"),
+                        OpenCodeSessionGroup("reading", "Reading", listOf("ses_root"), parentID = null),
+                    ),
+                ),
+                client.sessionGroupsHierarchy(it.server),
+            )
+
+            val summary = client.sessionGroupsSummary(it.server)
+            assertEquals(9L, summary.revision)
+            assertEquals(
+                OpenCodeSessionGroupSummary("reading", 200, 2, 2, true, OpenCodeSessionGroupOutcomes(succeeded = 1, unreported = 1)),
+                summary.groups[0],
+            )
+            assertEquals(OpenCodeSessionGroupSummary("group_notes", null, 1, 0, false), summary.groups[1])
+
+            assertEquals(
+                listOf(
+                    "POST /api/rpc/session-groups/capabilities",
+                    "POST /api/rpc/session-groups/hierarchyList",
+                    "POST /api/rpc/session-groups/hierarchySummary",
+                ),
+                it.requests.map { r -> r.route },
+            )
+            for (request in it.requests) assertEquals(json("""{"input":{}}"""), request.json())
+        }
+    }
+
+    @Test
+    fun aLegacyPluginsCapabilitiesHaveNoHierarchy() = runTest {
+        val fixture = WireFixture { Reply.Json(200, """{"output":{"apiVersion":2,"operationIDs":true,"mutations":["create","assign"]}}""") }
+        withFixture(fixture) {
+            val capabilities = OpenCodeClient.liveValue.sessionGroupsCapabilities(it.server)
+            assertNull(capabilities.hierarchyVersion)
+            assertTrue(!capabilities.supportsHierarchy)
+        }
+    }
+
+    @Test
+    fun aHierarchySnapshotWithoutParentIDsIsRefused() = runTest {
+        val fixture = WireFixture { Reply.Json(200, """{"output":{"revision":5,"groups":[{"id":"reading","name":"Reading","sessionIDs":[]}]}}""") }
+        withFixture(fixture) {
+            expectClientError { OpenCodeClient.liveValue.sessionGroupsHierarchy(it.server) }
+        }
+    }
+
+    @Test
+    fun sessionGroupsHierarchyWritesSendTheContractsBodies() = runTest {
+        val answer = """{"output":{"revision":5,"groups":[{"id":"reading","name":"Reading","sessionIDs":["ses_root"],"parentID":null},""" +
+            """{"id":"group_papers","name":"Papers","sessionIDs":[],"parentID":"reading"}]}}"""
+        withFixture(WireFixture { Reply.Json(200, answer) }) { fixture ->
+            val client = OpenCodeClient.liveValue
+            val writes = listOf(
+                OpenCodeSessionGroupsWrite.HierarchyCreate("Papers", "reading") to """{"name":"Papers","parentID":"reading"}""",
+                OpenCodeSessionGroupsWrite.HierarchyCreate("Inbox", null) to """{"name":"Inbox","parentID":null}""",
+                OpenCodeSessionGroupsWrite.HierarchyMove("group_papers", null) to """{"groupID":"group_papers","parentID":null}""",
+                OpenCodeSessionGroupsWrite.HierarchyMove("group_papers", "reading") to """{"groupID":"group_papers","parentID":"reading"}""",
+                OpenCodeSessionGroupsWrite.HierarchyReorder("reading", listOf("group_notes", "group_papers")) to
+                    """{"parentID":"reading","groupIDs":["group_notes","group_papers"]}""",
+                OpenCodeSessionGroupsWrite.HierarchyReorder(null, listOf("b", "a")) to """{"parentID":null,"groupIDs":["b","a"]}""",
+                OpenCodeSessionGroupsWrite.HierarchyAssign("group_papers", "ses_1") to """{"groupID":"group_papers","sessionID":"ses_1"}""",
+                OpenCodeSessionGroupsWrite.HierarchyAssign(null, "ses_1") to """{"groupID":null,"sessionID":"ses_1"}""",
+                OpenCodeSessionGroupsWrite.HierarchyRename("group_papers", "Notes") to """{"groupID":"group_papers","name":"Notes"}""",
+                OpenCodeSessionGroupsWrite.HierarchyRemove("group_papers") to """{"groupID":"group_papers"}""",
+            )
+            for ((write, input) in writes) {
+                val snapshot = client.writeSessionGroups(fixture.server, write, 4, "op-${write.method}")
+                assertEquals("the answer is read as the hierarchy", "reading", snapshot.groups.single { g -> g.id == "group_papers" }.parentID)
+                val request = fixture.requests.last()
+                assertEquals("POST /api/rpc/session-groups/${write.method}", request.route)
+                val expected = json(input).jsonObject + mapOf("expectedRevision" to JsonPrimitive(4), "operationID" to JsonPrimitive("op-${write.method}"))
+                assertEquals(JsonObject(mapOf("input" to JsonObject(expected))), request.json())
+            }
         }
     }
 

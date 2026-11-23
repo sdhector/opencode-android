@@ -233,7 +233,11 @@ fun HomeDrawer(
     // predictive back drag moves the list with the finger. Each level keeps its own scroll.
     val levelTransition = rememberDrawerLevelTransition(levelDepth, reducedMotion)
     val rootListState = rememberLazyListState()
-    val groupListState = remember(trayGroup?.id) { LazyListState() }
+    // A parent keeps its scroll while one of its subgroups is open; a level left for the root starts at the top again.
+    val pathIDs by store.observe { it.drawerPath.groupIDs }
+    val groupListStates = remember(current.persistenceID) { HashMap<String, LazyListState>() }
+    groupListStates.keys.retainAll(pathIDs.toSet())
+    val groupListState = trayGroup?.let { group -> groupListStates.getOrPut(group.id) { LazyListState() } }
     PredictiveBackHandler(enabled = isDrawerVisible && trayGroup != null && !viewState.showsArchived) { events ->
         try {
             events.collect { levelTransition.back.snapTo(it.progress) }
@@ -349,7 +353,7 @@ fun HomeDrawer(
             actions = actions,
             contentPadding = listPadding,
             modifier = Modifier.fillMaxSize().then(beneathArchived).drawerLevel(levelTransition, reducedMotion),
-            listState = if (trayGroup != null) groupListState else rootListState,
+            listState = groupListState ?: rootListState,
         )
         // The list as the drawer's pan sees it: between the title band and the controls, which take
         // their own touches.

@@ -57,6 +57,7 @@ import ai.opencode.server.model.OpenCodeNotifyPluginStatus
 import ai.opencode.server.model.OpenCodeProject
 import ai.opencode.server.model.OpenCodeSession
 import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
+import ai.opencode.server.model.OpenCodeSessionGroupsSummary
 import ai.opencode.server.model.OpenCodeTranscriptItem
 import ai.opencode.server.model.SessionActivity
 import ai.opencode.server.model.SessionTitle
@@ -165,6 +166,8 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         val sharedSessionGroups: SharedSessionGroups = SharedSessionGroups(),
         /** This server's shared groups this run: discovery, queued writes, the sharing dialog. */
         val groupSync: GroupSync = GroupSync(),
+        /** Mirror of `DrawerSharedKeys.groupsByActivity`. */
+        val groupsByActivity: Boolean = false,
         /** A shared groups change the server refused or couldn't be reached for, shown above New Session for a few seconds. */
         val groupsError: DrawerFailure? = null,
         /** Mirror of `SharedKeys.sidebarShown`: beside a wide window's sidebar, whether it shows. */
@@ -606,6 +609,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
                     hiddenSessionKeys = shared(SharedKeys.hiddenSessionKeys).value,
                     sessionGroups = shared(DrawerSharedKeys.sessionGroups).value,
                     sharedSessionGroups = shared(DrawerSharedKeys.sharedSessionGroups).value,
+                    groupsByActivity = shared(DrawerSharedKeys.groupsByActivity).value,
                     isSidebarShown = shared(SharedKeys.sidebarShown).value,
                     showsWhatsNewButton = WhatsNewFeature.State().showsButton,
                     initializedInboxServerIDs = shared(SharedKeys.initializedInboxServerIDs).value,
@@ -732,8 +736,12 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data class DrawerGroupOpened(val groupID: String) : Action
         /** Back from a group (system back, its title's back button): the list goes up one level. */
         data object DrawerGroupBackTapped : Action
-        /** Makes a group and puts [sessionIDs] in it. */
-        data class CreateGroup(val name: String, val sessionIDs: List<String> = emptyList()) : Action
+        /** Makes a group and puts [sessionIDs] in it; with a [parentID], a subgroup at the end of that group's. */
+        data class CreateGroup(val name: String, val sessionIDs: List<String> = emptyList(), val parentID: String? = null) : Action
+        /** A group's Move To: under the root [parentID], last among its subgroups, or back to the top level with null. */
+        data class MoveGroupToParent(val groupID: String, val parentID: String?) : Action
+        /** This device's group order: by last activity, or the saved (manual) order. Never sent to a server. */
+        data class GroupSortChanged(val byActivity: Boolean) : Action
         data class RenameGroup(val groupID: String, val name: String) : Action
         /** Removes the group only; its sessions stay where they are on the server and in the list. */
         data class RemoveGroup(val groupID: String) : Action
@@ -771,6 +779,13 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         /** The import's payload, with sessions the server no longer has left out. */
         data class SharedGroupsImportPrepared(val serverID: String, val groups: List<SessionGroup>) : Action
         data object SharedGroupsPollTick : Action
+        /** A `hierarchySummary`'s answer for request number [request]: the summary, or why it failed. */
+        data class SharedGroupsSummaryRead(
+            val serverID: String,
+            val request: Int,
+            val summary: OpenCodeSessionGroupsSummary? = null,
+            val error: OpenCodeClientError? = null,
+        ) : Action
         data object ClearGroupsError : Action
         /** A computer paired for the first time: open the drawer on its sessions. */
         data object PairedComputerOpened : Action
@@ -895,6 +910,7 @@ class HomeFeature : Reducer<HomeFeature.State, HomeFeature.Action> {
         data object SharedGroupsWrite : CancelID
         data object SharedGroupsPoll : CancelID
         data object SharedGroupsImport : CancelID
+        data object SharedGroupsSummary : CancelID
         data object GroupsError : CancelID
     }
 

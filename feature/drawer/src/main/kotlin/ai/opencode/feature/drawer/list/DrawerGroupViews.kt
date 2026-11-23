@@ -13,13 +13,21 @@ import ai.opencode.core.ui.OpenCodeTextField
 import ai.opencode.core.ui.OpenCodeTheme
 import ai.opencode.core.ui.SFSymbol
 import ai.opencode.core.ui.openCodeTapTarget
+import ai.opencode.core.ui.OpenCodeTextStyles
 import ai.opencode.feature.drawer.GroupSharingStatus
+import ai.opencode.feature.drawer.GroupStatus
 import ai.opencode.feature.drawer.HomeFeature
 import ai.opencode.feature.drawer.R
+import ai.opencode.feature.drawer.groupMoveTargets
+import ai.opencode.feature.drawer.groupPickerEntries
+import ai.opencode.feature.drawer.groups.GroupActivityCoverage
 import ai.opencode.feature.drawer.groups.GroupSharingPrompt
 import ai.opencode.feature.drawer.groups.SessionGroups
-import ai.opencode.feature.drawer.serverGroups
 import ai.opencode.feature.drawer.sharedGroups
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.semantics.selected
 import ai.opencode.feature.drawer.style.DrawerDropSlotRow
 import ai.opencode.feature.drawer.style.DrawerMetrics
 import ai.opencode.feature.drawer.style.DrawerTunables
@@ -91,10 +99,14 @@ import kotlin.math.roundToInt
 @Stable
 class DrawerGroupEditor {
     sealed interface Request {
-        data class Create(val sessionIDs: List<String> = emptyList()) : Request
+        /** A new group; with a [parentID], a subgroup of that root. */
+        data class Create(val sessionIDs: List<String> = emptyList(), val parentID: String? = null) : Request
         data class Rename(val groupID: String, val name: String) : Request
-        data class Remove(val groupID: String, val name: String) : Request
+        /** With [hasSubgroups] it only says what has to happen first. */
+        data class Remove(val groupID: String, val name: String, val hasSubgroups: Boolean = false) : Request
         data class Move(val sessionIDs: List<String>) : Request
+        /** Choose where a group goes: another root, or the top level. */
+        data class MoveGroup(val groupID: String, val name: String) : Request
     }
 
     var request: Request? by mutableStateOf(null)
@@ -107,6 +119,8 @@ class DrawerGroupHeaderActions(
     val remove: () -> Unit,
     val moveUp: () -> Unit = {},
     val moveDown: () -> Unit = {},
+    val newSubgroup: () -> Unit = {},
+    val moveToParent: () -> Unit = {},
     /** The list is scrolling or flinging. */
     val isListMoving: () -> Boolean = { false },
     /** The held finger moved: the group lifts at this list `y` (dp) to be reordered ([DrawerGroupDrag]). */
@@ -119,9 +133,10 @@ class DrawerGroupHeaderActions(
 )
 
 /**
- * A group's row: its name and size, and a chevron to say a tap opens it. A hold opens its menu (Move
- * Up, Move Down, Rename, Remove), which TalkBack also offers as actions; moving the held finger
- * lifts the row to reorder the groups.
+ * A group's row, laid out as Archived's: its name, its rolled-up status in a slot that keeps its room,
+ * and its size. A tap opens it. A hold opens its menu (Move Up, Move Down, New Subgroup, Move Group,
+ * Rename, Remove), which TalkBack also offers as actions; moving the held finger lifts the row to
+ * reorder it among its siblings.
  */
 @Composable
 fun DrawerListGroupHeaderCell(
@@ -130,11 +145,14 @@ fun DrawerListGroupHeaderCell(
     pinDrag: DrawerPinDrag,
     modifier: Modifier = Modifier,
     listCoordinates: () -> LayoutCoordinates? = { null },
+    reducedMotion: Boolean = false,
+    increasedContrast: Boolean = false,
 ) {
     val colors = OpenCodeTheme.colors
     val density = LocalDensity.current
     val key = DrawerPinDrag.ItemKey.GroupHeader(header.id)
     val count = pluralStringResource(R.plurals.drawer_group_session_count, header.count, header.count)
+    val statusText = groupStatusText(header.status)
     var menuOpen by remember { mutableStateOf(false) }
     val menuLabel = stringResource(R.string.drawer_selection_more_options_description)
     val currentActions by rememberUpdatedState(actions)
@@ -143,7 +161,7 @@ fun DrawerListGroupHeaderCell(
     val groupDrag = pinDrag.groupDrag
     val lifted = groupDrag.draggingID == header.id
     val reorderable = header.canMoveUp || header.canMoveDown
-    val hasMenu = reorderable || header.canRename || header.canRemove
+    val hasMenu = reorderable || header.canRename || header.canRemove || header.canCreateSubgroup || header.canMoveToParent
     val raisedSurface = if (colors.isDark) MaterialTheme.colorScheme.surfaceContainerHigh else colors.canvas
     val customActions = groupCustomActions(header) { currentActions }
 
@@ -198,6 +216,7 @@ fun DrawerListGroupHeaderCell(
                 .padding(start = DrawerMetrics.textInset, end = DrawerMetrics.trailingInset)
                 .clearAndSetSemantics {
                     contentDescription = "${header.name}, $count"
+                    if (statusText != null) stateDescription = statusText
                     role = Role.Button
                     onClick { currentActions.open(); true }
                     if (hasMenu) onLongClick(menuLabel) { menuOpen = true; true }
@@ -217,12 +236,12 @@ fun DrawerListGroupHeaderCell(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            GroupStatusIndicator(header.id, header.status, reducedMotion, increasedContrast)
             Text(
                 "${header.count}",
                 style = DrawerTunables.rowFont.font.copy(fontFeatureSettings = "tnum"),
                 color = colors.secondaryText,
             )
-            OpenCodeIcon(SFSymbol.ChevronRight, contentDescription = null, size = 14.dp, tint = colors.tertiaryText)
         }
         GroupMenu(expanded = menuOpen, header = header, onDismiss = { menuOpen = false }, actions = { currentActions })
     }
@@ -245,7 +264,7 @@ fun DrawerListGroupTitleRow(
     val menuLabel = stringResource(R.string.drawer_selection_more_options_description)
     val currentActions by rememberUpdatedState(actions)
     val titleHeader = header.copy(canMoveUp = false, canMoveDown = false)
-    val hasMenu = titleHeader.canRename || titleHeader.canRemove
+    val hasMenu = titleHeader.canRename || titleHeader.canRemove || titleHeader.canCreateSubgroup || titleHeader.canMoveToParent
     val customActions = groupCustomActions(titleHeader) { currentActions }
     Row(
         modifier
@@ -302,35 +321,26 @@ fun DrawerListGroupTitleRow(
 private fun groupCustomActions(header: DrawerListGroupHeader, actions: () -> DrawerGroupHeaderActions): List<CustomAccessibilityAction> {
     val moveUp = stringResource(R.string.drawer_move_up)
     val moveDown = stringResource(R.string.drawer_move_down)
+    val newSubgroup = stringResource(R.string.drawer_group_new_subgroup)
+    val moveGroup = stringResource(R.string.drawer_group_move_to)
     val rename = stringResource(R.string.drawer_group_rename)
     val remove = stringResource(R.string.drawer_group_remove)
     return buildList {
         if (header.canMoveUp) add(CustomAccessibilityAction(moveUp) { actions().moveUp(); true })
         if (header.canMoveDown) add(CustomAccessibilityAction(moveDown) { actions().moveDown(); true })
+        if (header.canCreateSubgroup) add(CustomAccessibilityAction(newSubgroup) { actions().newSubgroup(); true })
+        if (header.canMoveToParent) add(CustomAccessibilityAction(moveGroup) { actions().moveToParent(); true })
         if (header.canRename) add(CustomAccessibilityAction(rename) { actions().rename(); true })
         if (header.canRemove) add(CustomAccessibilityAction(remove) { actions().remove(); true })
     }
 }
 
-/** A group's menu: Move Up and Move Down while it can trade places, then Rename and Remove. */
+/** A group's menu: Move Up and Move Down while it can trade places, New Subgroup and Move Group where groups nest, then Rename and Remove. */
 @Composable
 private fun GroupMenu(expanded: Boolean, header: DrawerListGroupHeader, onDismiss: () -> Unit, actions: () -> DrawerGroupHeaderActions) {
     val colors = OpenCodeTheme.colors
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss, modifier = Modifier.testTag("drawer-group-menu")) {
-        if (header.canMoveUp) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.drawer_move_up)) },
-                leadingIcon = { OpenCodeIcon(SFSymbol.ArrowUp, contentDescription = null) },
-                onClick = { onDismiss(); actions().moveUp() },
-            )
-        }
-        if (header.canMoveDown) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.drawer_move_down)) },
-                leadingIcon = { OpenCodeIcon(SFSymbol.ArrowDown, contentDescription = null) },
-                onClick = { onDismiss(); actions().moveDown() },
-            )
-        }
+        GroupMenuItems(header, onDismiss, actions)
         if (header.canRename) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.drawer_group_rename)) },
@@ -345,6 +355,88 @@ private fun GroupMenu(expanded: Boolean, header: DrawerListGroupHeader, onDismis
                 onClick = { onDismiss(); actions().remove() },
             )
         }
+    }
+}
+
+@Composable
+private fun GroupMenuItems(header: DrawerListGroupHeader, onDismiss: () -> Unit, actions: () -> DrawerGroupHeaderActions) {
+    if (header.canMoveUp) {
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.drawer_move_up)) },
+            leadingIcon = { OpenCodeIcon(SFSymbol.ArrowUp, contentDescription = null) },
+            onClick = { onDismiss(); actions().moveUp() },
+        )
+    }
+    if (header.canMoveDown) {
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.drawer_move_down)) },
+            leadingIcon = { OpenCodeIcon(SFSymbol.ArrowDown, contentDescription = null) },
+            onClick = { onDismiss(); actions().moveDown() },
+        )
+    }
+    if (header.canCreateSubgroup) {
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.drawer_group_new_subgroup)) },
+            leadingIcon = { OpenCodeIcon(SFSymbol.FolderBadgePlus, contentDescription = null) },
+            onClick = { onDismiss(); actions().newSubgroup() },
+        )
+    }
+    if (header.canMoveToParent) {
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.drawer_group_move_to)) },
+            leadingIcon = { OpenCodeIcon(SFSymbol.ArrowTurnDownRight, contentDescription = null) },
+            onClick = { onDismiss(); actions().moveToParent() },
+        )
+    }
+}
+
+/** The rolled-up status's words for TalkBack, the session rows' own; null with nothing to say. */
+@Composable
+private fun groupStatusText(status: GroupStatus): String? = when (status) {
+    GroupStatus.attention -> stringResource(R.string.drawer_row_needs_input_state)
+    GroupStatus.running -> stringResource(R.string.drawer_row_working_state)
+    GroupStatus.failed -> stringResource(R.string.drawer_row_unsent_failed_state)
+    GroupStatus.unread -> stringResource(R.string.drawer_row_unread_state)
+    GroupStatus.none -> null
+}
+
+/**
+ * A group's status in the session rows' marks (the Working ring, the attention or unread dot, the
+ * failed send's mark), in a slot that always keeps its room so the count never moves. A change for
+ * the same group fades on `MotionRole.MicroIn`, as a row's does; Reduce Motion keeps the fade and stops the ring.
+ */
+@Composable
+private fun GroupStatusIndicator(groupID: String, status: GroupStatus, reducedMotion: Boolean, increasedContrast: Boolean) {
+    val colors = OpenCodeTheme.colors
+    val density = LocalDensity.current
+    val previousID = remember { arrayOf(groupID) }
+    val animates = previousID[0] == groupID
+    previousID[0] = groupID
+    val phase = if (status != GroupStatus.none) MotionPhase.Enter else MotionPhase.Exit
+    val spec = if (animates) MotionRole.MicroIn.animation<Float>(phase, reducedMotion) else snap()
+    val ringAlpha by animateFloatAsState(if (status == GroupStatus.running) 1f else 0f, spec, label = "group-ring")
+    val dotAlpha by animateFloatAsState(if (status == GroupStatus.attention || status == GroupStatus.unread) 1f else 0f, spec, label = "group-dot")
+    val failedAlpha by animateFloatAsState(if (status == GroupStatus.failed) 1f else 0f, spec, label = "group-failed")
+    Box(Modifier.size(DrawerListSessionCell.indicatorSize).testTag("drawer-group-status-$groupID"), contentAlignment = Alignment.Center) {
+        DrawerListActivityRing(
+            isSpinning = status == GroupStatus.running && !reducedMotion,
+            opaqueTail = increasedContrast,
+            modifier = Modifier.size(14.dp).graphicsLayer { alpha = ringAlpha },
+        )
+        OpenCodeIcon(
+            SFSymbol.CircleFill,
+            contentDescription = null,
+            size = (11 * density.fontScale).dp,
+            tint = if (status == GroupStatus.attention) colors.warning else colors.signal,
+            modifier = Modifier.graphicsLayer { alpha = dotAlpha },
+        )
+        OpenCodeIcon(
+            "exclamationmark.circle.fill",
+            contentDescription = null,
+            size = (15 * density.fontScale).dp,
+            tint = colors.danger,
+            modifier = Modifier.graphicsLayer { alpha = failedAlpha },
+        )
     }
 }
 
@@ -393,8 +485,9 @@ internal fun Modifier.drawerLevel(transition: DrawerLevelTransition, reduceMotio
 class DrawerGroupSharingActions(val share: () -> Unit, val import: () -> Unit, val stop: () -> Unit)
 
 /**
- * The row that ends the group section: New Group. On a server that can share groups it ends in a
- * sharing button whose menu turns sharing on or off and imports this phone's groups.
+ * The row that ends the group section: New Group. While there are groups it ends in a sort button
+ * (Manual or Last Activity, this device only); on a server that can share groups, in a sharing
+ * button whose menu turns sharing on or off and imports this phone's groups.
  */
 @Composable
 fun DrawerListNewGroupRow(
@@ -403,8 +496,11 @@ fun DrawerListNewGroupRow(
     modifier: Modifier = Modifier,
     sharing: GroupSharingStatus? = null,
     sharingActions: DrawerGroupSharingActions? = null,
+    sort: DrawerGroupSort? = null,
+    onSort: (byActivity: Boolean) -> Unit = {},
 ) {
-    if (sharing == null || sharingActions == null) {
+    val shares = sharing != null && sharingActions != null
+    if (!shares && sort == null) {
         NewGroupRow(pinDrag, onClick, modifier)
         return
     }
@@ -420,7 +516,61 @@ fun DrawerListNewGroupRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         NewGroupRow(pinDrag = null, onClick = onClick, modifier = Modifier.weight(1f))
-        GroupSharingButton(sharing, sharingActions)
+        if (sort != null) GroupSortButton(sort, onSort)
+        if (sharing != null && sharingActions != null) GroupSharingButton(sharing, sharingActions)
+    }
+}
+
+/** Manual (the saved order) or Last Activity; under Last Activity the menu says how much activity it can see. */
+@Composable
+private fun GroupSortButton(sort: DrawerGroupSort, onSort: (Boolean) -> Unit) {
+    val colors = OpenCodeTheme.colors
+    var menuOpen by remember { mutableStateOf(false) }
+    val manual = stringResource(R.string.drawer_groups_sort_manual)
+    val activity = stringResource(R.string.drawer_groups_sort_activity)
+    val note = when (sort.coverage) {
+        GroupActivityCoverage.Complete -> null
+        GroupActivityCoverage.Partial -> stringResource(R.string.drawer_groups_activity_partial)
+        GroupActivityCoverage.Stale -> stringResource(R.string.drawer_groups_activity_stale)
+        GroupActivityCoverage.LoadedOnly -> stringResource(R.string.drawer_groups_activity_loaded_only)
+    }
+    Box {
+        OpenCodeIconButton(
+            if (sort.byActivity) SFSymbol.Clock else SFSymbol.ListBullet,
+            contentDescription = stringResource(R.string.drawer_groups_sort),
+            onClick = { menuOpen = true },
+            style = OpenCodeIconButtonStyle.Standard,
+            modifier = Modifier
+                .testTag("drawer-group-sort")
+                .semantics { stateDescription = if (sort.byActivity) activity else manual },
+        )
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }, modifier = Modifier.testTag("drawer-group-sort-menu")) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.drawer_groups_sort), color = colors.secondaryText) },
+                onClick = {},
+                enabled = false,
+            )
+            for ((byActivity, title) in listOf(false to manual, true to activity)) {
+                DropdownMenuItem(
+                    text = { Text(title) },
+                    leadingIcon = {
+                        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                            if (sort.byActivity == byActivity) OpenCodeIcon(SFSymbol.Checkmark, contentDescription = null)
+                        }
+                    },
+                    onClick = { menuOpen = false; onSort(byActivity) },
+                    modifier = Modifier.semantics { selected = sort.byActivity == byActivity },
+                )
+            }
+            if (sort.byActivity && note != null) {
+                DropdownMenuItem(
+                    text = { Text(note, style = OpenCodeTextStyles.footnote, color = colors.secondaryText) },
+                    onClick = {},
+                    enabled = false,
+                    modifier = Modifier.testTag("drawer-group-activity-note"),
+                )
+            }
+        }
     }
 }
 
@@ -560,15 +710,27 @@ internal fun DrawerGroupDialogs(store: StoreOf<HomeFeature.State, HomeFeature.Ac
     val dismiss = { editor.request = null }
     when (request) {
         is DrawerGroupEditor.Request.Create -> GroupNameDialog(
-            title = stringResource(R.string.drawer_group_new),
+            title = stringResource(if (request.parentID == null) R.string.drawer_group_new else R.string.drawer_group_new_subgroup),
             initialName = "",
             confirm = stringResource(CoreR.string.common_add),
             onDismiss = dismiss,
             onConfirm = { name ->
-                store.send(HomeFeature.Action.CreateGroup(name, request.sessionIDs))
+                store.send(HomeFeature.Action.CreateGroup(name, request.sessionIDs, request.parentID))
                 dismiss()
             },
         )
+        is DrawerGroupEditor.Request.Remove -> if (request.hasSubgroups) {
+            OpenCodeAlertDialog(
+                onDismissRequest = dismiss,
+                title = { Text(stringResource(R.string.drawer_group_remove_title, request.name)) },
+                text = { Text(stringResource(R.string.drawer_group_remove_parent_message)) },
+                confirmButton = { TextButton(onClick = dismiss) { Text(stringResource(CoreR.string.common_ok)) } },
+                modifier = Modifier.testTag("drawer-group-remove-blocked"),
+            )
+        } else {
+            RemoveGroupDialog(store, request, shared, dismiss)
+        }
+        is DrawerGroupEditor.Request.MoveGroup -> GroupParentPickerDialog(store, request, onDismiss = dismiss)
         is DrawerGroupEditor.Request.Rename -> GroupNameDialog(
             title = stringResource(R.string.drawer_group_rename),
             initialName = request.name,
@@ -579,23 +741,60 @@ internal fun DrawerGroupDialogs(store: StoreOf<HomeFeature.State, HomeFeature.Ac
                 dismiss()
             },
         )
-        is DrawerGroupEditor.Request.Remove -> OpenCodeAlertDialog(
-            onDismissRequest = dismiss,
-            title = { Text(stringResource(R.string.drawer_group_remove_title, request.name)) },
-            text = { Text(stringResource(if (shared) R.string.drawer_group_remove_shared_message else R.string.drawer_group_remove_message)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.send(HomeFeature.Action.RemoveGroup(request.groupID))
-                    dismiss()
-                }) {
-                    Text(stringResource(CoreR.string.common_remove), color = OpenCodeTheme.colors.destructive)
-                }
-            },
-            dismissButton = { TextButton(onClick = dismiss) { Text(stringResource(CoreR.string.common_cancel)) } },
-            modifier = Modifier.testTag("drawer-group-remove-confirmation"),
-        )
         is DrawerGroupEditor.Request.Move -> GroupPickerDialog(store, request.sessionIDs, editor, onDismiss = dismiss)
     }
+}
+
+@Composable
+private fun RemoveGroupDialog(
+    store: StoreOf<HomeFeature.State, HomeFeature.Action>,
+    request: DrawerGroupEditor.Request.Remove,
+    shared: Boolean,
+    dismiss: () -> Unit,
+) {
+    OpenCodeAlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text(stringResource(R.string.drawer_group_remove_title, request.name)) },
+        text = { Text(stringResource(if (shared) R.string.drawer_group_remove_shared_message else R.string.drawer_group_remove_message)) },
+        confirmButton = {
+            TextButton(onClick = {
+                store.send(HomeFeature.Action.RemoveGroup(request.groupID))
+                dismiss()
+            }) {
+                Text(stringResource(CoreR.string.common_remove), color = OpenCodeTheme.colors.destructive)
+            }
+        },
+        dismissButton = { TextButton(onClick = dismiss) { Text(stringResource(CoreR.string.common_cancel)) } },
+        modifier = Modifier.testTag("drawer-group-remove-confirmation"),
+    )
+}
+
+/** Where a group can go: the top level while it's a subgroup, and each root that can hold it. */
+@Composable
+private fun GroupParentPickerDialog(
+    store: StoreOf<HomeFeature.State, HomeFeature.Action>,
+    request: DrawerGroupEditor.Request.MoveGroup,
+    onDismiss: () -> Unit,
+) {
+    val targets by store.observe { state -> state.groupMoveTargets(request.groupID) }
+    val colors = OpenCodeTheme.colors
+    val topLevel = stringResource(R.string.drawer_group_top_level)
+    OpenCodeAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.drawer_group_move_to_title, request.name)) },
+        text = {
+            Column(Modifier.testTag("drawer-group-parent-picker")) {
+                for ((parentID, name) in targets) {
+                    PickerRow(name ?: topLevel, if (parentID == null) SFSymbol.ListBullet else SFSymbol.Folder, colors.text) {
+                        store.send(HomeFeature.Action.MoveGroupToParent(request.groupID, parentID))
+                        onDismiss()
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(CoreR.string.common_cancel)) } },
+    )
 }
 
 /** The sharing dialog Home is asking: turn sharing on (and maybe import), import, or stop. */
@@ -703,7 +902,8 @@ private fun GroupPickerDialog(
     editor: DrawerGroupEditor,
     onDismiss: () -> Unit,
 ) {
-    val groups by store.observe { it.serverGroups }
+    val path = stringResource(R.string.drawer_group_path)
+    val groups by store.observe { state -> state.groupPickerEntries { parent, name -> String.format(path, parent, name) } }
     val colors = OpenCodeTheme.colors
     OpenCodeAlertDialog(
         onDismissRequest = onDismiss,
@@ -711,7 +911,7 @@ private fun GroupPickerDialog(
         text = {
             Column(Modifier.testTag("drawer-group-picker")) {
                 for (group in groups) {
-                    PickerRow(group.name, SFSymbol.Folder, colors.text) {
+                    PickerRow(group.name, SFSymbol.Folder, colors.text, indented = group.isSubgroup) {
                         store.send(HomeFeature.Action.MoveSessionsToGroup(sessionIDs, group.id))
                         onDismiss()
                     }
@@ -727,14 +927,20 @@ private fun GroupPickerDialog(
 }
 
 @Composable
-private fun PickerRow(title: String, symbol: SFSymbol, tint: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
+private fun PickerRow(
+    title: String,
+    symbol: SFSymbol,
+    tint: androidx.compose.ui.graphics.Color,
+    indented: Boolean = false,
+    onClick: () -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(DrawerMetrics.rowCornerRadius))
             .clickable(role = Role.Button, onClick = onClick)
             .openCodeTapTarget()
-            .padding(horizontal = 4.dp),
+            .padding(start = if (indented) 28.dp else 4.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {

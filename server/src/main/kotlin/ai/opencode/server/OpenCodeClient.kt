@@ -52,6 +52,8 @@ import ai.opencode.server.live.requestRunningShells
 import ai.opencode.server.live.requestSearchSessions
 import ai.opencode.server.live.requestSessionGroups
 import ai.opencode.server.live.requestSessionGroupsCapabilities
+import ai.opencode.server.live.requestSessionGroupsHierarchy
+import ai.opencode.server.live.requestSessionGroupsSummary
 import ai.opencode.server.live.requestSessionPage
 import ai.opencode.server.live.requestWriteSessionGroups
 import ai.opencode.server.live.requestSendCommand
@@ -107,6 +109,7 @@ import ai.opencode.server.model.OpenCodeSessionPageRequest
 import ai.opencode.server.model.OpenCodeSessionFamily
 import ai.opencode.server.model.OpenCodeSessionGroupsCapabilities
 import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
+import ai.opencode.server.model.OpenCodeSessionGroupsSummary
 import ai.opencode.server.model.OpenCodeSessionGroupsWrite
 import ai.opencode.server.model.OpenCodeShell
 import ai.opencode.server.model.OpenCodeJob
@@ -201,6 +204,10 @@ data class OpenCodeClient(
         expectedRevision: Long,
         operationID: String?,
     ) -> OpenCodeSessionGroupsSnapshot,
+    /** The hierarchy snapshot (`hierarchyList`), on a plugin whose capabilities report `hierarchyVersion` 1. */
+    val sessionGroupsHierarchy: suspend (server: OpenCodeServer) -> OpenCodeSessionGroupsSnapshot,
+    /** Each shared group's activity rollup (`hierarchySummary`), for the revision it names. */
+    val sessionGroupsSummary: suspend (server: OpenCodeServer) -> OpenCodeSessionGroupsSummary,
     /** Location-scoped: pass only the open session's directory. */
     val runningShells: suspend (server: OpenCodeServer, directory: String) -> List<OpenCodeShell>,
     /** The session's running background jobs, its descendants' included (`GET /api/experimental/job`). */
@@ -333,6 +340,8 @@ data class OpenCodeClient(
             sessionGroupsCapabilities = ::requestSessionGroupsCapabilities,
             sessionGroups = ::requestSessionGroups,
             writeSessionGroups = ::requestWriteSessionGroups,
+            sessionGroupsHierarchy = ::requestSessionGroupsHierarchy,
+            sessionGroupsSummary = ::requestSessionGroupsSummary,
             runningShells = ::requestRunningShells,
             runningJobs = ::requestRunningJobs,
             cancelJob = ::requestCancelJob,
@@ -417,6 +426,8 @@ data class OpenCodeClient(
                     sessionGroupsCapabilities = { unimplemented("sessionGroupsCapabilities") },
                     sessionGroups = { unimplemented("sessionGroups") },
                     writeSessionGroups = { _, _, _, _ -> unimplemented("writeSessionGroups") },
+                    sessionGroupsHierarchy = { unimplemented("sessionGroupsHierarchy") },
+                    sessionGroupsSummary = { unimplemented("sessionGroupsSummary") },
                     runningShells = { _, _ -> unimplemented("runningShells") },
                     runningJobs = { _, _ -> emptyList() },
                     cancelJob = { _, _ -> },

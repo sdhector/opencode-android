@@ -430,7 +430,8 @@ fun DrawerListView(
         serverID = model.serverID,
         search = model.search,
         pinned = model.sections[DrawerListSection.pinned].orEmpty(),
-        groups = model.groupHeaders.keys.toList(),
+        // Last Activity re-sorts on its own: only a move made by hand in the saved order slides.
+        groups = if (homeState.value.groupsByActivity) emptyList() else model.groupHeaders.keys.toList(),
         level = model.tray?.id,
     )
     shownPins[0]?.let { previous ->
@@ -494,13 +495,15 @@ fun DrawerListView(
                     DrawerListItem.Archived -> ArchivedEntryRow(current.archivedCount, regularList = true, onClick = { currentActions.openArchived() })
                     is DrawerListItem.GroupHeader -> {
                         val header = current.groupHeaders[item.groupID] ?: return@itemsIndexed
-                        val groupActions = remember(header.id, header.name) {
+                        val groupActions = remember(header.id, header.name, header.hasSubgroups) {
                             DrawerGroupHeaderActions(
                                 open = { currentActions.openGroup(header.id) },
-                                rename ={ currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
-                                remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
+                                rename = { currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
+                                remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name, header.hasSubgroups)) },
                                 moveUp = { store.send(HomeFeature.Action.MoveGroupUp(header.id)) },
                                 moveDown = { store.send(HomeFeature.Action.MoveGroupDown(header.id)) },
+                                newSubgroup = { currentActions.editGroups(DrawerGroupEditor.Request.Create(parentID = header.id)) },
+                                moveToParent = { currentActions.editGroups(DrawerGroupEditor.Request.MoveGroup(header.id, header.name)) },
                                 isListMoving = { listState.isScrollInProgress },
                                 beginDrag = { y -> beginGroupDrag(header.id, y) },
                                 moveDrag = { y, time -> pinDrag.groupDrag.update(y, time) },
@@ -508,15 +511,24 @@ fun DrawerListView(
                                 dismantled = { if (pinDrag.groupDrag.draggingID == header.id) pinDrag.groupDrag.cancelNow() },
                             )
                         }
-                        DrawerListGroupHeaderCell(header, groupActions, pinDrag, listCoordinates = { listCoordinates[0] })
+                        DrawerListGroupHeaderCell(
+                            header,
+                            groupActions,
+                            pinDrag,
+                            listCoordinates = { listCoordinates[0] },
+                            reducedMotion = current.reducedMotion,
+                            increasedContrast = currentInputs.value.increasedContrast,
+                        )
                     }
                     is DrawerListItem.GroupTitle -> {
                         val header = current.tray ?: return@itemsIndexed
-                        val titleActions = remember(header.id, header.name) {
+                        val titleActions = remember(header.id, header.name, header.hasSubgroups) {
                             DrawerGroupHeaderActions(
                                 open = {},
                                 rename = { currentActions.editGroups(DrawerGroupEditor.Request.Rename(header.id, header.name)) },
-                                remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name)) },
+                                remove = { currentActions.editGroups(DrawerGroupEditor.Request.Remove(header.id, header.name, header.hasSubgroups)) },
+                                newSubgroup = { currentActions.editGroups(DrawerGroupEditor.Request.Create(parentID = header.id)) },
+                                moveToParent = { currentActions.editGroups(DrawerGroupEditor.Request.MoveGroup(header.id, header.name)) },
                             )
                         }
                         DrawerListGroupTitleRow(header, onBack = { currentActions.groupBack() }, actions = titleActions)
@@ -526,8 +538,10 @@ fun DrawerListView(
                         onClick = { currentActions.editGroups(DrawerGroupEditor.Request.Create()) },
                         sharing = current.groupSharing,
                         sharingActions = groupSharingActions,
+                        sort = current.groupSort,
+                        onSort = { store.send(HomeFeature.Action.GroupSortChanged(it)) },
                     )
-                    is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag)
+                    is DrawerListItem.Header -> DrawerListHeaderCell(item.kind, pinDrag, ungrouped = current.recentsAreUngrouped)
                     DrawerListItem.RecentsDrop -> DrawerRecentsDropSlot(pinDrag)
                     DrawerListItem.Empty -> DrawerListEmptyRow(current.search)
                     DrawerListItem.Footer -> DrawerListFooterRow(

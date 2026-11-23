@@ -25,7 +25,9 @@ import ai.opencode.core.store.TestStore
 import ai.opencode.feature.drawer.groups.DraftGroupTarget
 import ai.opencode.feature.drawer.groups.DrawerPath
 import ai.opencode.feature.drawer.groups.DrawerSharedKeys
+import ai.opencode.feature.drawer.groups.GroupActivityCoverage
 import ai.opencode.feature.drawer.groups.GroupEdit
+import ai.opencode.feature.drawer.list.DrawerGroupSort
 import ai.opencode.feature.drawer.groups.GroupSharingPrompt
 import ai.opencode.feature.drawer.groups.GroupSync
 import ai.opencode.feature.drawer.groups.GroupWrite
@@ -37,7 +39,9 @@ import ai.opencode.feature.drawer.groups.SharedSessionGroups
 import ai.opencode.server.model.OpenCodeRpcError
 import ai.opencode.server.model.OpenCodeSessionGroup
 import ai.opencode.server.model.OpenCodeSessionGroupsCapabilities
+import ai.opencode.server.model.OpenCodeSessionGroupSummary
 import ai.opencode.server.model.OpenCodeSessionGroupsSnapshot
+import ai.opencode.server.model.OpenCodeSessionGroupsSummary
 import ai.opencode.server.model.OpenCodeSessionGroupsWrite
 import kotlinx.coroutines.test.runTest
 import kotlin.time.Duration.Companion.milliseconds
@@ -732,8 +736,59 @@ class SessionGroupsTests {
         /** Thrown (once) instead of answering the next write. */
         var failNextWrite: OpenCodeClientError? = null
         var failReads: OpenCodeClientError? = null
+        /** `hierarchySummary`'s answer; null fails it. */
+        var summary: (() -> OpenCodeSessionGroupsSummary)? = null
 
-        fun snapshot() = OpenCodeSessionGroupsSnapshot(revision, groups)
+        /** Legacy `list`: the roots only, without parent links. */
+        fun snapshot() = OpenCodeSessionGroupsSnapshot(revision, groups.filter { it.parentID == null })
+
+        fun hierarchySnapshot() = OpenCodeSessionGroupsSnapshot(revision, groups)
+
+        fun offersHierarchy() {
+            capabilities = capabilities?.copy(hierarchyVersion = 1)
+        }
+
+        private fun siblings(parentID: String?) = groups.filter { it.parentID == parentID }
+
+        private fun hierarchyWrite(write: OpenCodeSessionGroupsWrite.Hierarchy): List<OpenCodeSessionGroup> {
+            fun find(id: String) = groups.firstOrNull { it.id == id } ?: throw rpc(OpenCodeRpcError.GROUP_NOT_FOUND)
+            fun root(id: String?) = id?.let { find(it).also { parent -> if (parent.parentID != null) throw rpc(OpenCodeRpcError.INVALID_INPUT) } }
+            return when (write) {
+                is OpenCodeSessionGroupsWrite.HierarchyCreate -> {
+                    root(write.parentID)
+                    groups + OpenCodeSessionGroup("srv_${++ids}", write.name.trim(), parentID = write.parentID)
+                }
+                is OpenCodeSessionGroupsWrite.HierarchyMove -> {
+                    val group = find(write.groupID)
+                    root(write.parentID)
+                    if (write.parentID == group.id || write.parentID != null && siblings(group.id).isNotEmpty()) throw rpc(OpenCodeRpcError.INVALID_INPUT)
+                    if (group.parentID == write.parentID) groups else groups - group + group.copy(parentID = write.parentID)
+                }
+                is OpenCodeSessionGroupsWrite.HierarchyReorder -> {
+                    val current = siblings(write.parentID)
+                    if (write.groupIDs.size != current.size || write.groupIDs.toSet() != current.map { it.id }.toSet()) throw rpc(OpenCodeRpcError.INVALID_INPUT)
+                    val ordered = write.groupIDs.map(::find).iterator()
+                    groups.map { if (it.parentID == write.parentID) ordered.next() else it }
+                }
+                is OpenCodeSessionGroupsWrite.HierarchyAssign -> assigned(write.groupID, write.sessionID)
+                is OpenCodeSessionGroupsWrite.HierarchyRename -> groups.map { if (find(write.groupID).id == it.id) it.copy(name = write.name) else it }
+                is OpenCodeSessionGroupsWrite.HierarchyRemove -> {
+                    find(write.groupID)
+                    if (siblings(write.groupID).isNotEmpty()) throw rpc(OpenCodeRpcError.INVALID_INPUT)
+                    groups.filterNot { it.id == write.groupID }
+                }
+            }
+        }
+
+        private fun assigned(groupID: String?, sessionID: String): List<OpenCodeSessionGroup> {
+            if (sessionID !in sessions) throw rpc(OpenCodeRpcError.SESSION_NOT_FOUND)
+            if (groupID != null && groups.none { it.id == groupID }) throw rpc(OpenCodeRpcError.GROUP_NOT_FOUND)
+            return groups.map { group ->
+                val kept = group.sessionIDs - sessionID
+                if (group.id == groupID) group.copy(sessionIDs = if (sessionID in group.sessionIDs) group.sessionIDs else kept + sessionID)
+                else group.copy(sessionIDs = kept)
+            }
+        }
 
         /** Another client's write. */
         fun elsewhere(change: (List<OpenCodeSessionGroup>) -> List<OpenCodeSessionGroup>) {
@@ -749,21 +804,17 @@ class SessionGroupsTests {
             sent += Triple(write, expected, operationID)
             failNextWrite?.let { failNextWrite = null; throw it }
             if (operationID != null) {
-                receipts[operationID]?.let { (w, e) -> if (w == write && e == expected) return snapshot() else throw rpc(OpenCodeRpcError.OPERATION_CONFLICT) }
+                receipts[operationID]?.let { (w, e) ->
+                    if (w != write || e != expected) throw rpc(OpenCodeRpcError.OPERATION_CONFLICT)
+                    return if (write is OpenCodeSessionGroupsWrite.Hierarchy) hierarchySnapshot() else snapshot()
+                }
             }
             if (write is OpenCodeSessionGroupsWrite.Import && initialized) throw rpc(OpenCodeRpcError.IMPORT_REFUSED, revision)
             if (expected != revision) throw rpc(OpenCodeRpcError.REVISION_CONFLICT, revision)
             groups = when (write) {
+                is OpenCodeSessionGroupsWrite.Hierarchy -> hierarchyWrite(write)
                 is OpenCodeSessionGroupsWrite.Create -> groups + OpenCodeSessionGroup("srv_${++ids}", write.name.trim())
-                is OpenCodeSessionGroupsWrite.Assign -> {
-                    if (write.sessionID !in sessions) throw rpc(OpenCodeRpcError.SESSION_NOT_FOUND)
-                    if (write.groupID != null && groups.none { it.id == write.groupID }) throw rpc(OpenCodeRpcError.GROUP_NOT_FOUND)
-                    groups.map { group ->
-                        val kept = group.sessionIDs - write.sessionID
-                        if (group.id == write.groupID) group.copy(sessionIDs = if (write.sessionID in group.sessionIDs) group.sessionIDs else kept + write.sessionID)
-                        else group.copy(sessionIDs = kept)
-                    }
-                }
+                is OpenCodeSessionGroupsWrite.Assign -> assigned(write.groupID, write.sessionID)
                 is OpenCodeSessionGroupsWrite.Reorder -> write.groupIDs.map { id -> groups.first { it.id == id } }
                 is OpenCodeSessionGroupsWrite.Rename -> groups.map { if (it.id == write.groupID) it.copy(name = write.name) else it }
                 is OpenCodeSessionGroupsWrite.Remove -> {
@@ -778,7 +829,7 @@ class SessionGroupsTests {
             revision += 1
             initialized = true
             if (operationID != null) receipts[operationID] = write to expected
-            return snapshot()
+            return if (write is OpenCodeSessionGroupsWrite.Hierarchy) hierarchySnapshot() else snapshot()
         }
 
         fun client(): OpenCodeClient = OpenCodeClient.testValue.copy(
@@ -792,6 +843,15 @@ class SessionGroupsTests {
                 snapshot()
             },
             writeSessionGroups = { _, write, expected, operationID -> write(write, expected, operationID) },
+            sessionGroupsHierarchy = {
+                calls += "hierarchyList"
+                failReads?.let { throw it }
+                hierarchySnapshot()
+            },
+            sessionGroupsSummary = {
+                calls += "hierarchySummary"
+                summary?.invoke() ?: throw OpenCodeClientError("unreachable")
+            },
             getSession = { _, id ->
                 if (id !in sessions) throw OpenCodeClientError("gone", statusCode = 404)
                 OpenCodeSession(id = id, serverTitle = id, projectID = "p", directory = "/project", updatedAt = Instant.EPOCH)
@@ -1245,7 +1305,11 @@ class SessionGroupsTests {
             listOf(DrawerListItem.GroupTitle("g"), DrawerListItem.Session("b"), DrawerListItem.Session("c")),
             inside.items,
         )
-        assertEquals(DrawerListGroupHeader("g", "Group g", count = 2), inside.tray)
+        assertEquals(
+            "never read: its sessions' unread rolls up to it",
+            DrawerListGroupHeader("g", "Group g", count = 2, status = GroupStatus.unread, canCreateSubgroup = true, canMoveToParent = true),
+            inside.tray,
+        )
         assertTrue("nothing else to drag between", inside.groupHeaders.isEmpty())
 
         store.send(Action.DrawerGroupBackTapped)
@@ -1391,6 +1455,497 @@ class SessionGroupsTests {
         assertFalse("nor coming back", shown(inside).movesPins(shown(root)))
         val unpinned = state.copy(pinnedSessionKeys = emptyList()).model()
         assertTrue("an Unpin at the root still does", shown(root).movesPins(shown(unpinned)))
+    }
+
+    // endregion
+
+    // region Subgroups
+
+    private fun child(id: String, parent: String, vararg members: String) =
+        SessionGroup(id = id, name = "Group $id", sessionIDs = members.toList(), parentID = parent)
+
+    @Test
+    fun filesSavedBeforeSubgroupsReadAsRootsAndRoundTripUnchanged() {
+        val json = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+            explicitNulls = false
+        }
+        val earlier = """{"byServer":{"$serverID":[{"id":"g","name":"Work","isCollapsed":true,"sessionIDs":["a","b"]},""" +
+            """{"id":"h","name":"Home","isCollapsed":false,"sessionIDs":[]}]}}"""
+        val read = json.decodeFromString(SessionGroups.serializer(), earlier)
+        assertEquals("every earlier group is a root, in its saved order", listOf("g", "h"), read.siblings(serverID, null).map { it.id })
+        assertEquals(listOf("a", "b"), read.group(serverID, "g")?.sessionIDs)
+        assertEquals("written back unchanged", json.parseToJsonElement(earlier), json.parseToJsonElement(json.encodeToString(SessionGroups.serializer(), read)))
+
+        val sharedEarlier = """{"byServer":{"$serverID":{"revision":4,"groups":[{"id":"reading","name":"Reading","isCollapsed":false,""" +
+            """"sessionIDs":["ses_root"]}],"collapsedIDs":["reading"]}}}"""
+        val shared = json.decodeFromString(SharedSessionGroups.serializer(), sharedEarlier)
+        assertEquals(4L, shared[serverID]?.revision)
+        assertNull(shared[serverID]?.summary)
+        assertEquals(json.parseToJsonElement(sharedEarlier), json.parseToJsonElement(json.encodeToString(SharedSessionGroups.serializer(), shared)))
+    }
+
+    @Test
+    fun subgroupsNestOneLevelAndMoveOnlyAmongTheirSiblings() {
+        val store = SessionGroups()
+            .creating(serverID, "r1", "Reading")
+            .creating(serverID, "r2", "Work")
+            .creating(serverID, "c1", "Papers", parentID = "r1")
+            .creating(serverID, "c2", "Notes", parentID = "r1")
+        assertEquals(listOf("r1", "r2"), store.siblings(serverID, null).map { it.id })
+        assertEquals(listOf("c1", "c2"), store.siblings(serverID, "r1").map { it.id })
+        assertEquals("no third level", store, store.creating(serverID, "x", "Deep", parentID = "c1"))
+        assertEquals("no unknown parent", store, store.creating(serverID, "x", "Lost", parentID = "missing"))
+        assertEquals(listOf("r1", "c1"), store.chain(serverID, "c1"))
+        assertEquals(listOf("r1", "c1", "c2", "r2"), store.tree(serverID).map { it.id })
+
+        val reordered = store.moving(serverID, "c2", 0)
+        assertEquals(listOf("c2", "c1"), reordered.siblings(serverID, "r1").map { it.id })
+        assertEquals("the roots keep their order", listOf("r1", "r2"), reordered.siblings(serverID, null).map { it.id })
+        assertEquals("a root moves among the roots only", listOf("r2", "r1"), store.moving(serverID, "r2", 0).siblings(serverID, null).map { it.id })
+        assertEquals(store.siblings(serverID, "r1"), store.moving(serverID, "r2", 0).siblings(serverID, "r1"))
+
+        assertEquals("a parent stays at the top level", emptyList<String?>(), store.moveTargets(serverID, "r1"))
+        assertEquals(listOf(null, "r2"), store.moveTargets(serverID, "c1"))
+        assertEquals(listOf("r1"), store.moveTargets(serverID, "r2"))
+        val moved = store.assigning(serverID, listOf("s1"), "c1").reparenting(serverID, "c1", "r2")
+        assertEquals("r2", moved.parentID(serverID, "c1"))
+        assertEquals("a moved group keeps its ID and sessions", "c1", moved.groupID(serverID, "s1"))
+        assertEquals(listOf("r1", "r2", "c2"), store.reparenting(serverID, "c2", null).siblings(serverID, null).map { it.id })
+        assertEquals("a parent can't go under another root", store, store.reparenting(serverID, "r1", "r2"))
+
+        assertEquals("a group with subgroups stays", store, store.removing(serverID, "r1"))
+        val withMember = store.assigning(serverID, listOf("s1"), "c1")
+        assertNull("removing a subgroup ungroups its own sessions", withMember.removing(serverID, "c1").groupID(serverID, "s1"))
+        val repeated = store.creating(serverID, "c3", "Papers", parentID = "r2")
+        assertEquals("Reading › Papers", repeated.displayName(serverID, "c1") { parent, name -> "$parent › $name" })
+        assertEquals("Notes", repeated.displayName(serverID, "c2") { parent, name -> "$parent › $name" })
+    }
+
+    @Test
+    fun hierarchyEditsBecomeTheContractsWritesAndALegacyServerGetsNoSubgroupWrite() {
+        val current = SessionGroups(mapOf(serverID to listOf(group("r1", "s1"), child("c1", "r1"), group("r2"), child("c2", "r1"))))
+        fun GroupEdit.hierarchy() = write(current, serverID, hierarchy = true)
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyCreate("Papers", "r1"), GroupEdit.Create("tmp", "Papers", "r1").hierarchy())
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyCreate("Top", null), GroupEdit.Create("tmp", "Top").hierarchy())
+        assertNull("a legacy server can't hold a subgroup", GroupEdit.Create("tmp", "Papers", "r1").write(current, serverID))
+        assertEquals(OpenCodeSessionGroupsWrite.Create("Top"), GroupEdit.Create("tmp", "Top").write(current, serverID))
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyReorder("r1", listOf("c2", "c1")), GroupEdit.Move("c2", 0).hierarchy())
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyReorder(null, listOf("r2", "r1")), GroupEdit.Move("r2", 0).hierarchy())
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyMove("c1", null), GroupEdit.Reparent("c1", null).hierarchy())
+        assertNull("already there", GroupEdit.Reparent("c1", "r1").hierarchy())
+        assertNull(GroupEdit.Reparent("c1", null).write(current, serverID))
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyAssign("c1", "s1"), GroupEdit.Assign("s1", "c1").hierarchy())
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyAssign(null, "s1"), GroupEdit.Assign("s1", null).hierarchy())
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyRename("c1", "Notes"), GroupEdit.Rename("c1", " Notes ").hierarchy())
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyRemove("c1"), GroupEdit.Remove("c1").hierarchy())
+        assertEquals(
+            "an import stays flat",
+            OpenCodeSessionGroupsWrite.Import(listOf(OpenCodeSessionGroup("c1", "Group c1"))),
+            GroupEdit.Import(PendingImport("op", listOf(child("c1", "r1")))).hierarchy(),
+        )
+        assertEquals(GroupEdit.Create("x", "Sub", "srv"), GroupEdit.Create("x", "Sub", "tmp").renamingGroup("tmp", "srv"))
+        assertEquals(GroupEdit.Reparent("srv", "r1"), GroupEdit.Reparent("tmp", "r1").renamingGroup("tmp", "srv"))
+        assertTrue("a subgroup waits for its parent's create", GroupEdit.Create("x", "Sub", "tmp").dependsOn("tmp"))
+        assertTrue(GroupEdit.Reparent("c1", "tmp").dependsOn("tmp"))
+    }
+
+    @Test
+    fun subgroupsOpenOneLevelAtATimeAndBackGoesUpOne() = homeTest { h ->
+        val sessions = listOf(session("a", 50), session("b", 40), session("c", 30), session("d", 20), session("e", 10))
+        val saved = SessionGroups(mapOf(serverID to listOf(group("r", "b"), child("c1", "r", "d", "c"), group("q"), child("c2", "r", "a"))))
+        h.setShared(DrawerSharedKeys.sessionGroups, saved)
+        val played = LockIsolated<List<Haptic>>(emptyList())
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) }) {
+            this[HapticsClient] = HapticsClient(play = { played.append(it) })
+        }
+        store.exhaustive = false
+
+        val root = store.state.model()
+        assertEquals("only the roots show at the top", listOf("r", "q"), root.groupHeaders.keys.toList())
+        assertEquals("a root counts its subgroups' sessions", 4, root.groupHeaders["r"]?.count)
+        assertEquals("then the sessions in no group", listOf("e"), root.sessionIDs())
+        assertTrue(root.recentsAreUngrouped)
+        assertTrue(root.groupHeaders["r"]!!.hasSubgroups)
+
+        store.send(Action.DrawerGroupOpened("r"))
+        val parent = store.state.model()
+        assertEquals(
+            "its subgroups, then only its own sessions: no Recents page",
+            listOf(DrawerListItem.GroupTitle("r"), DrawerListItem.GroupHeader("c1"), DrawerListItem.GroupHeader("c2"), DrawerListItem.Session("b")),
+            parent.items,
+        )
+        assertEquals(4, parent.tray?.count)
+        val c1 = parent.groupHeaders["c1"]!!
+        assertEquals(2, c1.count)
+        assertTrue(c1.isSubgroup)
+        assertFalse("no third level", c1.canCreateSubgroup)
+        assertTrue(c1.canMoveDown)
+        assertTrue("to the top level, or under q", c1.canMoveToParent)
+
+        store.send(Action.DrawerGroupOpened("c1"))
+        assertEquals(DrawerPath(listOf("r", "c1")), store.state.drawerPath)
+        assertEquals(
+            "newest first",
+            listOf(DrawerListItem.GroupTitle("c1"), DrawerListItem.Session("c"), DrawerListItem.Session("d")),
+            store.state.model().items,
+        )
+        store.send(Action.DrawerGroupBackTapped)
+        assertEquals("back goes up one level", DrawerPath(listOf("r")), store.state.drawerPath)
+        store.send(Action.DrawerGroupBackTapped)
+        assertTrue(store.state.drawerPath.isRoot)
+
+        store.send(Action.DrawerGroupOpened("c2"))
+        assertEquals("a subgroup opened from search sits under its root", DrawerPath(listOf("r", "c2")), store.state.drawerPath)
+        assertTrue("going in and out is quiet", played.value.isEmpty())
+        assertEquals("and writes nothing", saved, h.shared(DrawerSharedKeys.sessionGroups))
+    }
+
+    @Test
+    fun searchListsSubgroupMatchesUnderTheirPath() = homeTest { h ->
+        val sessions = listOf(session("a", 40), session("b", 30))
+        val state = h.state { HomeFeature.State(server, snapshot(sessions)) }
+            .copy(sessionGroups = SessionGroups(mapOf(serverID to listOf(group("r", "a"), child("c", "r", "b")))), search = "Title")
+        val model = state.model()
+        assertEquals(listOf("r", "c"), model.groupHeaders.keys.toList())
+        assertEquals("Group r › Group c", model.groupHeaders["c"]?.name)
+        assertEquals(listOf("b"), model.groupHeaders["c"]?.sessionIDs)
+        assertNull(model.groupSort)
+    }
+
+    @Test
+    fun movingAGroupKeepsItsSessionsAndThePathFollowsIt() = homeTest { h ->
+        val saved = SessionGroups(mapOf(serverID to listOf(group("r"), child("c", "r", "b"), group("q"))))
+        h.setShared(DrawerSharedKeys.sessionGroups, saved)
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40), session("b", 30)))) }) {
+            this[UuidClient] = UuidClient.incrementing()
+        }
+        store.exhaustive = false
+        fun parentOf(id: String) = store.state.shownGroups.parentID(serverID, id)
+
+        store.send(Action.DrawerGroupOpened("c"))
+        store.send(Action.MoveGroupToParent("c", "q"))
+        assertEquals("q", parentOf("c"))
+        assertEquals(listOf("b"), store.state.shownGroups.group(serverID, "c")?.sessionIDs)
+        assertEquals("the open list follows it", DrawerPath(listOf("q", "c")), store.state.drawerPath)
+
+        store.send(Action.MoveGroupToParent("q", "r"))
+        assertNull("a group with subgroups stays a root", parentOf("q"))
+        store.send(Action.RemoveGroup("q"))
+        assertNotNull("and can't be removed while it has them", store.state.shownGroups.group(serverID, "q"))
+
+        store.send(Action.MoveGroupToParent("c", null))
+        assertNull(parentOf("c"))
+        assertEquals(DrawerPath(listOf("c")), store.state.drawerPath)
+        assertEquals(listOf("r", "q", "c"), store.state.shownGroups.siblings(serverID, null).map { it.id })
+
+        store.send(Action.CreateGroup("Sub", parentID = "r"))
+        val sub = store.state.serverGroups.single { it.name == "Sub" }
+        assertEquals("r", sub.parentID)
+        store.send(Action.CreateGroup("Deep", parentID = sub.id))
+        assertTrue("no third level", store.state.serverGroups.none { it.name == "Deep" })
+        store.send(Action.RemoveGroup("q"))
+        assertNull(store.state.shownGroups.group(serverID, "q"))
+        assertEquals("phone-only groups are saved on the phone", store.state.sessionGroups, h.shared(DrawerSharedKeys.sessionGroups))
+    }
+
+    @Test
+    fun newSessionInsideASubgroupStartsThere() = homeTest { h ->
+        val project = OpenCodeProject(id = "p", name = "project", directory = "/project")
+        val saved = SessionGroups(mapOf(serverID to listOf(group("r"), child("c", "r"))))
+        h.setShared(DrawerSharedKeys.sessionGroups, saved)
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)), projects = listOf(project))) }.copy(sessionGroups = saved))
+        store.exhaustive = false
+        store.send(Action.DrawerGroupOpened("c"))
+        store.send(Action.DrawerNewSessionTapped)
+        assertTrue(store.state.sessionDetail!!.isDraft)
+        assertEquals("c", store.state.draftGroup?.groupID)
+    }
+
+    @Test
+    fun manualOrderMovesOnlySiblingsAndLastActivityNeverWritesIt() = homeTest { h ->
+        val sessions = listOf(session("a", 10), session("b", 20), session("c", 30), session("d", 40))
+        val saved = SessionGroups(mapOf(serverID to listOf(group("old", "a"), group("new", "b"), group("idle"), child("sub", "old", "d"), child("sub2", "old", "c"))))
+        h.setShared(DrawerSharedKeys.sessionGroups, saved)
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(sessions)) })
+        store.exhaustive = false
+        fun roots() = store.state.shownGroups.siblings(serverID, null).map { it.id }
+
+        store.send(Action.MoveGroupDown("sub"))
+        assertEquals(listOf("sub2", "sub"), store.state.shownGroups.siblings(serverID, "old").map { it.id })
+        assertEquals("the roots keep their order", listOf("old", "new", "idle"), roots())
+        store.send(Action.DrawerGroupDropped("idle", 0))
+        assertEquals(listOf("idle", "old", "new"), roots())
+        val manual = h.shared(DrawerSharedKeys.sessionGroups)
+
+        store.send(Action.GroupSortChanged(byActivity = true))
+        assertTrue("a device preference", h.shared(DrawerSharedKeys.groupsByActivity))
+        val sorted = store.state.model()
+        assertEquals("newest activity first, a subgroup's included; none seen last", listOf("old", "new", "idle"), sorted.groupHeaders.keys.toList())
+        assertEquals(DrawerGroupSort(byActivity = true, coverage = GroupActivityCoverage.Complete), sorted.groupSort)
+        assertFalse("no reordering by hand", sorted.groupHeaders.values.any { it.canMoveUp || it.canMoveDown })
+        store.send(Action.MoveGroupUp("new"))
+        store.send(Action.DrawerGroupDropped("new", 0))
+        assertEquals("sorting never writes the saved order", manual, h.shared(DrawerSharedKeys.sessionGroups))
+        store.send(Action.DrawerGroupOpened("old"))
+        assertEquals("subgroups sort too", listOf("sub", "sub2"), store.state.model().groupHeaders.keys.toList())
+
+        store.send(Action.DrawerGroupBackTapped)
+        store.send(Action.GroupSortChanged(byActivity = false))
+        assertFalse(h.shared(DrawerSharedKeys.groupsByActivity))
+        assertEquals("Manual shows the saved order again", listOf("idle", "old", "new"), store.state.model().groupHeaders.keys.toList())
+    }
+
+    @Test
+    fun statusRollsUpThroughSubgroupsWithTheRowsPrecedence() = homeTest { h ->
+        val sessions = listOf(
+            session("waiting", 10), session("working", 20), session("fresh", 30), session("pinned", 40),
+            session("archived", 50, archived = true), session("quiet", 60),
+        )
+        val saved = SessionGroups(
+            mapOf(
+                serverID to listOf(
+                    group("r", "fresh"), child("c", "r", "waiting"), child("w", "r", "working"),
+                    group("p"), child("pc", "p", "pinned"),
+                    group("a", "archived"), group("m", "quiet"), group("u", "unloaded"),
+                ),
+            ),
+        )
+        h.setShared(DrawerSharedKeys.sessionGroups, saved)
+        val base = h.state { HomeFeature.State(server, snapshot(sessions)) }.connected()
+        val read = Instant.ofEpochSecond(1_000)
+        val state = base.copy(
+            attentionSessionIDs = setOf("waiting"),
+            activeSessionIDs = setOf("working"),
+            sessionReadDates = mapOf(base.sessionKey("waiting") to read, base.sessionKey("working") to read, base.sessionKey("archived") to read),
+            pinnedSessionKeys = listOf(base.sessionKey("pinned")),
+            mutedSessionKeys = setOf(base.sessionKey("quiet")),
+        )
+        val rollups = state.groupRollups()
+        assertEquals(GroupStatus.attention, rollups["c"]?.status)
+        assertEquals(GroupStatus.running, rollups["w"]?.status)
+        assertEquals("needs input outranks running and unread, through a subgroup", GroupStatus.attention, rollups["r"]?.status)
+        assertEquals("a pinned member still lights its groups", GroupStatus.unread, rollups["p"]?.status)
+        assertEquals(GroupStatus.unread, rollups["pc"]?.status)
+        assertEquals("archived sessions don't", GroupStatus.none, rollups["a"]?.status)
+        assertEquals("a muted session's unread stays hidden", GroupStatus.none, rollups["m"]?.status)
+        assertEquals("a member it hasn't loaded invents nothing", GroupStatus.none, rollups["u"]?.status)
+        assertFalse(rollups["u"]!!.activityComplete)
+        assertTrue(rollups["r"]!!.activityComplete)
+        assertEquals(60_000L, rollups["m"]?.lastActivity)
+        assertEquals("a parent's activity includes its subgroups'", 30_000L, rollups["r"]?.lastActivity)
+        assertEquals(GroupActivityCoverage.LoadedOnly, state.groupActivityCoverage(rollups))
+
+        val model = state.model()
+        assertEquals(GroupStatus.attention, model.groupHeaders["r"]?.status)
+        assertEquals(GroupStatus.unread, model.groupHeaders["p"]?.status)
+        val offline = state.copy(connection = state.connection.copy(connectionStatus = HomeConnectionFeature.State.ConnectionStatus.disconnected))
+        assertTrue("nothing is lit without a connection", offline.groupRollups().values.all { it.status == GroupStatus.none })
+    }
+
+    @Test
+    fun aHierarchyServerIsReadAndWrittenThroughTheHierarchyMethods() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b")).apply { offersHierarchy() }
+        plugin.elsewhere { listOf(OpenCodeSessionGroup("reading", "Reading", listOf("a"))) }
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40), session("b", 30)))) }.connected().copy(isDrawerOpen = true)) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+            this[Clock] = TestClock()
+        }
+        store.exhaustive = false
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        assertEquals(listOf("capabilities", "hierarchyList"), plugin.calls)
+        assertTrue(store.state.supportsSubgroups)
+
+        store.send(Action.CreateGroup("Papers", listOf("b"), parentID = "reading"))
+        assertEquals("it shows at once under its parent", "reading", store.state.serverGroups.single { it.name == "Papers" }.parentID)
+        repeat(2) { store.receiveWrite() }
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyCreate("Papers", "reading"), plugin.sent[0].first)
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyAssign("srv_1", "b"), plugin.sent[1].first)
+        assertEquals(
+            "the answer is the hierarchy",
+            listOf(SessionGroup("reading", "Reading", sessionIDs = listOf("a")), SessionGroup("srv_1", "Papers", sessionIDs = listOf("b"), parentID = "reading")),
+            store.state.serverGroups,
+        )
+
+        store.send(Action.CreateGroup("Notes", parentID = "reading"))
+        store.receiveWrite()
+        store.send(Action.MoveGroupUp("srv_2"))
+        store.receiveWrite()
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyReorder("reading", listOf("srv_2", "srv_1")), plugin.sent.last().first)
+        store.send(Action.MoveGroupToParent("srv_1", null))
+        store.receiveWrite()
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyMove("srv_1", null), plugin.sent.last().first)
+        assertEquals(listOf("reading", "srv_1"), store.state.shownGroups.siblings(serverID, null).map { it.id })
+        assertEquals("a moved group keeps its sessions", listOf("b"), store.state.shownGroups.group(serverID, "srv_1")?.sessionIDs)
+
+        store.send(Action.RemoveGroup("reading"))
+        assertEquals("a parent isn't sent for removal", 5, plugin.sent.size)
+        store.send(Action.RemoveGroup("srv_2"))
+        store.receiveWrite()
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyRemove("srv_2"), plugin.sent.last().first)
+        store.send(Action.RenameGroup("srv_1", "Archive"))
+        store.receiveWrite()
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyRename("srv_1", "Archive"), plugin.sent.last().first)
+
+        assertTrue("no legacy method once the hierarchy is offered", plugin.calls.none { it in setOf("list", "create", "assign", "reorder", "rename", "remove") })
+        assertEquals("every write is checked against the revision it was built from", (1L..7L).toList(), plugin.sent.map { it.second })
+        assertEquals("and has its own operation ID", 7, plugin.sent.mapNotNull { it.third }.toSet().size)
+        assertEquals(plugin.revision, store.state.sharedGroups?.revision)
+        assertEquals(plugin.hierarchySnapshot().groups.map { it.parentID }, store.state.sharedGroups?.groups?.map { it.parentID })
+    }
+
+    @Test
+    fun aHierarchyConflictDropsTheEditAndTheNextReadShowsTheOtherClientsTree() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a")).apply { offersHierarchy() }
+        plugin.elsewhere { listOf(OpenCodeSessionGroup("reading", "Reading"), OpenCodeSessionGroup("papers", "Papers", parentID = "reading")) }
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }.connected().copy(isDrawerOpen = true)) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+            this[Clock] = TestClock()
+        }
+        store.exhaustive = false
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        plugin.elsewhere { groups -> groups.map { if (it.id == "papers") it.copy(parentID = null) else it } }
+
+        store.send(Action.RenameGroup("papers", "Notes"))
+        store.receiveWrite()
+        assertEquals(1L, plugin.sent.single().second)
+        assertNotNull("said so", store.state.groupsError)
+        assertTrue(store.state.groupSync.needsRead)
+        assertEquals("the edit is dropped", "Papers", store.state.shownGroups.group(serverID, "papers")?.name)
+
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        assertEquals("hierarchyList", plugin.calls.last())
+        assertEquals(2L, store.state.sharedGroups?.revision)
+        assertNull("the other client's move shows", store.state.shownGroups.parentID(serverID, "papers"))
+    }
+
+    @Test
+    fun aLegacyServerKeepsGroupsOneLevelDeep() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        val plugin = FakeGroupsPlugin(sessions = setOf("a"))
+        plugin.elsewhere { listOf(OpenCodeSessionGroup("g", "G")) }
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40)))) }.connected().copy(isDrawerOpen = true)) {
+            this[OpenCodeClient] = plugin.client()
+            this[Clock] = TestClock()
+        }
+        store.exhaustive = false
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        assertEquals(listOf("capabilities", "list"), plugin.calls)
+        assertFalse(store.state.supportsSubgroups)
+        val header = store.state.model().groupHeaders["g"]!!
+        assertFalse(header.canCreateSubgroup)
+        assertFalse(header.canMoveToParent)
+        store.send(Action.CreateGroup("Sub", parentID = "g"))
+        assertTrue(store.state.serverGroups.none { it.name == "Sub" })
+        assertTrue(plugin.sent.isEmpty())
+    }
+
+    @Test
+    fun lastActivityUsesTheSummaryOnlyAtItsRevisionAndKeepsTheLastVerifiedOne() = homeTest { h ->
+        h.setShared(DrawerSharedKeys.sharedSessionGroups, sharedGroups(0))
+        h.setShared(DrawerSharedKeys.groupsByActivity, true)
+        val plugin = FakeGroupsPlugin(sessions = setOf("b", "older", "unloaded")).apply { offersHierarchy() }
+        plugin.elsewhere { listOf(OpenCodeSessionGroup("new", "New", listOf("b", "older")), OpenCodeSessionGroup("old", "Old", listOf("unloaded"))) }
+        fun summary(complete: Boolean) = OpenCodeSessionGroupsSummary(
+            plugin.revision,
+            listOf(
+                OpenCodeSessionGroupSummary("new", lastActivityAt = 30_000, memberCount = 2, observedNonArchivedCount = 1, complete = complete),
+                OpenCodeSessionGroupSummary("old", lastActivityAt = 90_000, memberCount = 1, observedNonArchivedCount = 1, complete = true),
+            ),
+        )
+        plugin.summary = { summary(complete = false) }
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("b", 30)))) }.connected().copy(isDrawerOpen = true)) {
+            this[OpenCodeClient] = plugin.client()
+            this[Clock] = TestClock()
+        }
+        store.exhaustive = false
+        fun order() = store.state.model().groupHeaders.keys.toList()
+        suspend fun receiveSummary() = store.receive({ it is Action.SharedGroupsSummaryRead }, "a shared groups summary")
+
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        assertEquals("before a summary, only the loaded sessions count", listOf("new", "old"), order())
+        assertEquals(GroupActivityCoverage.LoadedOnly, store.state.model().groupSort?.coverage)
+        receiveSummary()
+        assertEquals(listOf("capabilities", "hierarchyList", "hierarchySummary"), plugin.calls)
+        assertEquals("the server saw newer activity in a session this phone hasn't loaded", listOf("old", "new"), order())
+        assertEquals("one group's scan was cut short", GroupActivityCoverage.Partial, store.state.model().groupSort?.coverage)
+        assertEquals("the saved order is untouched", listOf("new", "old"), store.state.sharedGroups?.groups?.map { it.id })
+        val verified = store.state.sharedGroups?.summary
+        assertEquals("kept for a restart or an outage", verified, h.shared(DrawerSharedKeys.sharedSessionGroups)[serverID]?.summary)
+
+        plugin.summary = { OpenCodeSessionGroupsSummary(0, emptyList()) }
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        receiveSummary()
+        assertEquals("an answer for another revision is never applied", verified, store.state.sharedGroups?.summary)
+        assertEquals(GroupActivityCoverage.Stale, store.state.model().groupSort?.coverage)
+        assertEquals("the last verified activity still orders", listOf("old", "new"), order())
+
+        plugin.failReads = OpenCodeClientError("unreachable")
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        assertTrue(store.state.groupSync.isOffline)
+        assertEquals(GroupActivityCoverage.Stale, store.state.model().groupSort?.coverage)
+        assertEquals(listOf("old", "new"), order())
+        plugin.failReads = null
+
+        // Another client writes while the summary is read: its newer revision sends the drawer to read the groups first.
+        var bumped = false
+        plugin.summary = {
+            if (!bumped) {
+                bumped = true
+                plugin.elsewhere { it }
+            }
+            summary(complete = true)
+        }
+        store.send(Action.SharedGroupsPollTick)
+        store.receiveRead()
+        receiveSummary()
+        store.receiveRead()
+        receiveSummary()
+        assertEquals(2L, store.state.sharedGroups?.revision)
+        assertEquals(2L, store.state.sharedGroups?.summary?.revision)
+        assertEquals(GroupActivityCoverage.Complete, store.state.model().groupSort?.coverage)
+        assertEquals("the saved order is still untouched", listOf("new", "old"), store.state.sharedGroups?.groups?.map { it.id })
+        assertTrue("activity reads write nothing", plugin.sent.isEmpty())
+    }
+
+    @Test
+    fun importingIntoAHierarchyServerSendsFlatGroupsThenReadsAndLinksTheSubgroups() = homeTest { h ->
+        val local = SessionGroups(mapOf(serverID to listOf(group("r", "a"), child("c", "r", "b"))))
+        h.setShared(DrawerSharedKeys.sessionGroups, local)
+        val plugin = FakeGroupsPlugin(sessions = setOf("a", "b")).apply { offersHierarchy() }
+        val store = h.store(h.state { HomeFeature.State(server, snapshot(listOf(session("a", 40), session("b", 30)))) }.connected()) {
+            this[OpenCodeClient] = plugin.client()
+            this[UuidClient] = UuidClient.incrementing()
+        }
+        store.exhaustive = false
+        store.send(Action.ShareGroupsTapped)
+        store.receiveRead()
+        store.send(Action.ShareGroupsConfirmed(importsLocal = true))
+        store.receive({ it is Action.SharedGroupsImportPrepared })
+        store.receiveWrite()
+        store.receiveRead()
+        store.receiveWrite()
+        assertEquals(
+            OpenCodeSessionGroupsWrite.Import(listOf(OpenCodeSessionGroup("r", "Group r", listOf("a")), OpenCodeSessionGroup("c", "Group c", listOf("b")))),
+            plugin.sent[0].first,
+        )
+        assertEquals(OpenCodeSessionGroupsWrite.HierarchyMove("c", "r"), plugin.sent[1].first)
+        assertEquals(listOf("capabilities", "hierarchyList", "import", "hierarchyList", "hierarchyMove"), plugin.calls)
+        assertEquals("r", store.state.shownGroups.parentID(serverID, "c"))
+        assertEquals(listOf("b"), store.state.shownGroups.group(serverID, "c")?.sessionIDs)
+        assertEquals("the phone's own groups are kept", local, h.shared(DrawerSharedKeys.sessionGroups))
     }
 
     // endregion
