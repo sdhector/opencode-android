@@ -26,7 +26,8 @@ import kotlin.math.abs
 /**
  * The session drawer's pan. It watches every touch in the `Initial` pass, waits for 8 dp of travel
  * ([BackSwipeRules.decisionDistance]), then picks once: vertical or leftward on a shut drawer stays
- * with the content; rightward on the open drawer's list reveals the rows' times; rightward on a
+ * with the content; rightward on the open drawer's list goes back a level inside a group and
+ * reveals the rows' times elsewhere; rightward on a
  * scroller that can still scroll back stays with it except from the leading 28 dp edge; a finger that rested 0.45 s keeps its hold. Once chosen it
  * consumes the pointer. Touches are tested against the layout nodes registered in
  * [DrawerPanRegions].
@@ -36,6 +37,8 @@ object DirectionalPan {
         Begin,
         /** Slide the open drawer's rows to show their times. */
         Reveal,
+        /** Go back one level from the group the open drawer's list shows. */
+        LeaveGroup,
         Fail,
         Wait,
     }
@@ -43,6 +46,8 @@ object DirectionalPan {
     /** Where a touch began. */
     sealed interface TouchOrigin {
         data object DrawerList : TouchOrigin
+        /** The open drawer's list while it shows a group. */
+        data object DrawerGroupList : TouchOrigin
         data object DrawerChrome : TouchOrigin
         data object ExposedCard : TouchOrigin
         data class Content(val horizontalScrollerOwnsRightwardDrag: Boolean) : TouchOrigin
@@ -67,6 +72,7 @@ object DirectionalPan {
         if (dx * dx + dy * dy < decisionDistance * decisionDistance) return Decision.Wait
         if (abs(dx) <= abs(dy)) return Decision.Fail
         if (dx <= 0) return if (presented) Decision.Begin else Decision.Fail
+        if (presented && origin == TouchOrigin.DrawerGroupList) return Decision.LeaveGroup
         if (presented && origin == TouchOrigin.DrawerList) return Decision.Reveal
         if (!presented && origin == TouchOrigin.Content(horizontalScrollerOwnsRightwardDrag = true)) return Decision.Fail
         return Decision.Begin
@@ -84,14 +90,15 @@ object DirectionalPan {
 sealed interface DrawerPanEvent {
     /**
      * The pan chose this touch. [isRevealingTimes]: it slides the drawer rows' times rather
-     * than the card. [fingerTranslation] is the travel since touch-down (the card keeps the
-     * distance the decision would swallow); [translation] since the pan was chosen.
+     * than the card; [isLeavingGroup]: it takes the list back a level ([DrawerPanRegions.groupBack]).
+     * [fingerTranslation] is the travel since touch-down (the card keeps the distance the decision
+     * would swallow); [translation] since the pan was chosen.
      */
-    data class Began(val isRevealingTimes: Boolean, val fingerTranslation: Float, val translation: Float) : DrawerPanEvent
-    data class Changed(val isRevealingTimes: Boolean, val fingerTranslation: Float, val translation: Float) : DrawerPanEvent
+    data class Began(val isRevealingTimes: Boolean, val fingerTranslation: Float, val translation: Float, val isLeavingGroup: Boolean = false) : DrawerPanEvent
+    data class Changed(val isRevealingTimes: Boolean, val fingerTranslation: Float, val translation: Float, val isLeavingGroup: Boolean = false) : DrawerPanEvent
     /** Lifted at [velocity] dp/s. */
-    data class Ended(val isRevealingTimes: Boolean, val velocity: Float) : DrawerPanEvent
-    data class Cancelled(val isRevealingTimes: Boolean) : DrawerPanEvent
+    data class Ended(val isRevealingTimes: Boolean, val velocity: Float, val isLeavingGroup: Boolean = false) : DrawerPanEvent
+    data class Cancelled(val isRevealingTimes: Boolean, val isLeavingGroup: Boolean = false) : DrawerPanEvent
 }
 
 /**
@@ -111,6 +118,9 @@ class DrawerPanRegions : DrawerPanExclusion {
     internal val scrollers = HashMap<Any, Scroller>()
     internal val exclusions = HashMap<Any, LayoutCoordinates>()
     internal val selectionHandles = HashMap<Any, SelectionHandles>()
+
+    /** Set while the open drawer's list shows a group: a rightward drag on the list goes back through it. */
+    var groupBack: DrawerGroupBackPan? = null
 
     override fun updateExclusion(id: Any, coordinates: LayoutCoordinates?) {
         if (coordinates == null) exclusions.remove(id) else exclusions[id] = coordinates
@@ -222,6 +232,7 @@ fun Modifier.drawerDirectionalPan(
                 val isDrawerList = regions.lists.values.any { regions.contains(it, pan, point) }
                 val touchOrigin: DirectionalPan.TouchOrigin = if (presented) {
                     when {
+                        isDrawerList && hitDrawer && regions.groupBack != null -> DirectionalPan.TouchOrigin.DrawerGroupList
                         isDrawerList && hitDrawer -> DirectionalPan.TouchOrigin.DrawerList
                         onExposedCard -> DirectionalPan.TouchOrigin.ExposedCard
                         else -> DirectionalPan.TouchOrigin.DrawerChrome
@@ -238,6 +249,7 @@ fun Modifier.drawerDirectionalPan(
                 var holdBegan = false
                 var chosen = false
                 var revealing = false
+                var leaving = false
                 var chosenAt = 0f
                 while (true) {
                     val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -248,9 +260,9 @@ fun Modifier.drawerDirectionalPan(
                                 tracker.addPointerInputChange(change)
                                 change.consume()
                                 val velocity = tracker.calculateVelocity().x * sign / density
-                                onPan(DrawerPanEvent.Ended(revealing, velocity))
+                                onPan(DrawerPanEvent.Ended(revealing, velocity, leaving))
                             } else {
-                                onPan(DrawerPanEvent.Cancelled(revealing))
+                                onPan(DrawerPanEvent.Cancelled(revealing, leaving))
                             }
                         }
                         return@awaitEachGesture
@@ -261,7 +273,7 @@ fun Modifier.drawerDirectionalPan(
                     if (chosen) {
                         change.consume()
                         val finger = dx / density
-                        onPan(DrawerPanEvent.Changed(revealing, finger, finger - chosenAt))
+                        onPan(DrawerPanEvent.Changed(revealing, finger, finger - chosenAt, leaving))
                         continue
                     }
                     val decision = DirectionalPan.decision(touchOrigin, presented, dx, delta.y, decisionDistance)
@@ -275,17 +287,18 @@ fun Modifier.drawerDirectionalPan(
                             }
                         }
                         DirectionalPan.Decision.Fail -> return@awaitEachGesture
-                        DirectionalPan.Decision.Begin, DirectionalPan.Decision.Reveal -> {
+                        DirectionalPan.Decision.Begin, DirectionalPan.Decision.Reveal, DirectionalPan.Decision.LeaveGroup -> {
                             val heldFor = (change.uptimeMillis - downTime) / 1000.0
                             if (!startedAtEdge && DirectionalPan.yieldsToHold(heldFor, holdBegan)) {
                                 return@awaitEachGesture
                             }
                             chosen = true
                             revealing = decision == DirectionalPan.Decision.Reveal
+                            leaving = decision == DirectionalPan.Decision.LeaveGroup
                             change.consume()
                             val finger = dx / density
                             chosenAt = finger
-                            onPan(DrawerPanEvent.Began(revealing, finger, 0f))
+                            onPan(DrawerPanEvent.Began(revealing, finger, 0f, leaving))
                         }
                     }
                 }

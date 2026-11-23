@@ -80,6 +80,89 @@ class DirectionalPanGestureRecognizerTests {
             assertEquals(row.toString(), row.expected, decide(row.origin, row.presented, row.dx, row.dy, BackSwipeRules.decisionDistance.value))
         }
     }
+
+    /** Android only: inside a group, toward the card goes back a level instead of revealing times. */
+    @Test
+    fun groupListGoesBackInsteadOfRevealing() {
+        val decide = DirectionalPan::decision
+        val distance = BackSwipeRules.decisionDistance.value
+        val group = DirectionalPan.TouchOrigin.DrawerGroupList
+        assertEquals(DirectionalPan.Decision.LeaveGroup, decide(group, true, 20f, 1f, distance))
+        assertEquals("the root keeps the reveal", DirectionalPan.Decision.Reveal, decide(DirectionalPan.TouchOrigin.DrawerList, true, 20f, 1f, distance))
+        assertEquals("leftward still closes the drawer", DirectionalPan.Decision.Begin, decide(group, true, -20f, 1f, distance))
+        assertEquals("vertical stays with the list's scroll", DirectionalPan.Decision.Fail, decide(group, true, 9f, 10f, distance))
+        assertEquals(DirectionalPan.Decision.Wait, decide(group, true, 3f, 2f, distance))
+    }
+}
+
+class DrawerGroupBackPanTests {
+    @get:Rule val isolation = TestIsolationRule()
+
+    private class Harness(width: Float = 330f) {
+        val progress = mutableListOf<Float>()
+        var backs = 0
+        var settles = 0
+        val pan = DrawerGroupBackPan(
+            width = { width },
+            onProgress = { progress += it },
+            onBack = { backs += 1 },
+            onSettle = { settles += 1 },
+        )
+    }
+
+    @Test
+    fun followsTheFingerAsBackProgress() {
+        val harness = Harness()
+        harness.pan.began()
+        harness.pan.changed(-20f)
+        harness.pan.changed(82.5f)
+        harness.pan.changed(660f)
+        assertEquals(listOf(0f, 0f, 0.25f, 1f), harness.progress)
+        assertEquals(0f, DrawerGroupBackPan.progress(40f, width = 0f))
+    }
+
+    @Test
+    fun aCompletedSwipeGoesBackOnceAndAShortOneSettles() {
+        val harness = Harness()
+        harness.pan.began()
+        harness.pan.changed(200f)
+        harness.pan.ended(velocity = 0f)
+        assertEquals("past halfway goes back one level", 1, harness.backs)
+        assertEquals(0, harness.settles)
+        assertFalse(harness.pan.isActive)
+
+        harness.pan.began()
+        harness.pan.changed(60f)
+        harness.pan.ended(velocity = 0f)
+        assertEquals(1, harness.backs)
+        assertEquals("short of halfway it settles", 1, harness.settles)
+
+        harness.pan.began()
+        harness.pan.changed(30f)
+        harness.pan.ended(velocity = 2_000f)
+        assertEquals("a flick goes back", 2, harness.backs)
+
+        harness.pan.began()
+        harness.pan.changed(250f)
+        harness.pan.ended(velocity = -2_000f)
+        assertEquals("a flick away never goes back", 2, harness.backs)
+        assertEquals(2, harness.settles)
+    }
+
+    @Test
+    fun aCancelledOrCutShortDragSettlesOnceAndIgnoresTheRest() {
+        val harness = Harness()
+        harness.pan.began()
+        harness.pan.changed(250f)
+        harness.pan.cancelled()
+        assertEquals(1, harness.settles)
+        harness.pan.changed(300f)
+        harness.pan.ended(velocity = 2_000f)
+        harness.pan.cancelled()
+        assertEquals("the rest of the drag does nothing", 0, harness.backs)
+        assertEquals(1, harness.settles)
+        assertEquals(listOf(0f, 250f / 330f), harness.progress)
+    }
 }
 
 class DrawerSpringTests {

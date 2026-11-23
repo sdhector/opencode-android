@@ -287,7 +287,9 @@ fun SessionDrawerContainer(
             ) { event ->
                 if (!controller.acceptsPan(event)) return@drawerDirectionalPan
                 when (event) {
-                    is DrawerPanEvent.Began -> if (event.isRevealingTimes) {
+                    is DrawerPanEvent.Began -> if (event.isLeavingGroup) {
+                        panRegions.groupBack?.began()
+                    } else if (event.isRevealingTimes) {
                         currentOnReveal(DrawerRevealPhase.Began)
                         currentOnReveal(DrawerRevealPhase.Changed(event.translation))
                     } else {
@@ -295,15 +297,23 @@ fun SessionDrawerContainer(
                         motion.beginDrag()
                         motion.drag(event.fingerTranslation)
                     }
-                    is DrawerPanEvent.Changed -> if (event.isRevealingTimes) {
+                    is DrawerPanEvent.Changed -> if (event.isLeavingGroup) {
+                        panRegions.groupBack?.changed(event.translation)
+                    } else if (event.isRevealingTimes) {
                         currentOnReveal(DrawerRevealPhase.Changed(event.translation))
                     } else {
                         motion.drag(event.fingerTranslation)
                     }
-                    is DrawerPanEvent.Ended ->
-                        if (event.isRevealingTimes) currentOnReveal(DrawerRevealPhase.Ended) else motion.endDrag(event.velocity)
-                    is DrawerPanEvent.Cancelled ->
-                        if (event.isRevealingTimes) currentOnReveal(DrawerRevealPhase.Ended) else motion.cancelDrag()
+                    is DrawerPanEvent.Ended -> when {
+                        event.isLeavingGroup -> panRegions.groupBack?.ended(event.velocity)
+                        event.isRevealingTimes -> currentOnReveal(DrawerRevealPhase.Ended)
+                        else -> motion.endDrag(event.velocity)
+                    }
+                    is DrawerPanEvent.Cancelled -> when {
+                        event.isLeavingGroup -> panRegions.groupBack?.cancelled()
+                        event.isRevealingTimes -> currentOnReveal(DrawerRevealPhase.Ended)
+                        else -> motion.cancelDrag()
+                    }
                 }
             },
     ) {

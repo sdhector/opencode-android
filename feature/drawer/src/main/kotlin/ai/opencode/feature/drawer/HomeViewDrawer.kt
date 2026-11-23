@@ -44,6 +44,7 @@ import ai.opencode.feature.drawer.list.InboxSidebarList
 import ai.opencode.feature.drawer.list.SelectionHeaderSwap
 import ai.opencode.feature.drawer.list.rememberInboxSidebarOn
 import ai.opencode.feature.drawer.list.selectionActions
+import ai.opencode.feature.drawer.motion.DrawerGroupBackPan
 import ai.opencode.feature.drawer.motion.DrawerSearchPill
 import ai.opencode.feature.drawer.motion.DrawerSearchPillDefaults
 import ai.opencode.feature.drawer.motion.drawerPanList
@@ -100,6 +101,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -122,6 +125,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
 
@@ -312,10 +316,35 @@ fun HomeDrawer(
             editGroups = { viewState.groupEditor.request = it },
         )
     }
+    // Inside a group a rightward drag on the list goes back a level on the predictive back's transition.
+    val drawerWidth = remember { floatArrayOf(0f) }
+    val levelScope = rememberCoroutineScope()
+    val currentReducedMotion by rememberUpdatedState(reducedMotion)
+    val groupBackPan = remember(levelTransition, actions) {
+        DrawerGroupBackPan(
+            width = { drawerWidth[0] },
+            onProgress = { progress -> levelScope.launch { levelTransition.back.snapTo(progress) } },
+            onBack = actions.groupBack,
+            onSettle = {
+                levelScope.launch {
+                    levelTransition.back.animateTo(0f, MotionRole.Layout.animation(MotionPhase.Enter, currentReducedMotion))
+                }
+            },
+        )
+    }
+    val swipesBack = isDrawerVisible && trayGroup != null && !viewState.showsArchived && !selection.isActive
+    DisposableEffect(viewState.panRegions, groupBackPan, swipesBack) {
+        if (swipesBack) viewState.panRegions.groupBack = groupBackPan
+        onDispose {
+            if (viewState.panRegions.groupBack === groupBackPan) viewState.panRegions.groupBack = null
+            groupBackPan.cancelled()
+        }
+    }
 
     Box(
         modifier
             .fillMaxSize()
+            .onSizeChanged { drawerWidth[0] = it.width / density.density }
             .background(colors.drawerCanvas)
             // TalkBack reads top to bottom, list and bottom bar: the title and search, the list,
             // then New Session and Settings. The bands lie over the full-height list, so without an
